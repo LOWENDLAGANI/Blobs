@@ -1,0 +1,861 @@
+import type { FastifyInstance, FastifyReply, FastifyRequest } from 'fastify';
+import { APP_VERSION } from './env.ts';
+import { all, get, run } from './db.ts';
+import {
+  changePassphrase,
+  clearSessionCookie,
+  createOwner,
+  createSession,
+  destroySession,
+  getOwner,
+  isAuthed,
+  isSameOrigin,
+  loginAllowed,
+  ownerExists,
+  recordFailedLogin,
+  sessionToken,
+  setSessionCookie,
+  verifyPassphrase,
+} from './auth.ts';
+import {
+  getSettings,
+  providerApiKey,
+  providerConfig,
+  saveSettings,
+  setSecret,
+  PROVIDERS,
+  activeModelLabel,
+  DEFAULT_SETTINGS,
+} from './settings.ts';
+import {
+  activityCounts,
+  listActivity,
+  listNotifications,
+  logActivity,
+  markNotificationsRead,
+  notify,
+  subscribe,
+  unreadNotifications,
+} from './activity.ts';
+import {
+  deleteMemory,
+  listMemories,
+  memoryStats,
+  remember,
+  searchMemories,
+  updateMemory,
+} from './memory.ts';
+import {
+  listConversations,
+  getConversation,
+  runTurn,
+  continueAfterApproval,
+  summariseConversation,
+} from './agent/chat.ts';
+import {
+  cancelTask,
+  createTask,
+  executeTask,
+  getTask,
+  listTaskRows,
+  normalizeSchedule,
+  pauseTask,
+  resumeTask,
+  retryTask,
+  taskDetail,
+  taskStats,
+} from './agent/tasks.ts';
+import { executeApprovedTool } from './agent/core.ts';
+import { createProject, deleteProject, listProjects, updateProject } from './agent/projects.ts';
+import { schedulerState } from './agent/scheduler.ts';
+import { toolCatalog } from './agent/tools.ts';
+import { decideApproval, listApprovals, parseApprovalPayload } from './approvals.ts';
+import { resumeTaskAfterApproval } from './agent/tasks.ts';
+import { providerCatalog, testProvider, usageSummary } from './llm/index.ts';
+import {
+  emailConfig,
+  emailHistory,
+  emailStatus,
+  disconnectEmail,
+  fetchInbox,
+  saveEmailConfig,
+  sendEmail,
+} from './comms/email.ts';
+import {
+  disconnectPhone,
+  inboundTwiml,
+  outboundTwiml,
+  phoneHistory,
+  phoneStatus,
+  savePhoneConfig,
+  twimlSay,
+} from './comms/phone.ts';
+import { getSecret } from './settings.ts';
+import {
+  computerStatus,
+  desktopAction,
+  disconnectComputer,
+  resetComputer,
+  saveComputerKey,
+  screenshotPath,
+} from './computer/e2b.ts';
+import fs from 'node:fs';
+import { clamp, now, truncate } from './util.ts';
+
+const PUBLIC_PATHS = new Set([
+  '/api/health',
+  '/api/auth/state',
+  '/api/auth/setup',
+  '/api/auth/login',
+  '/api/voice/twiml',
+]);
+
+function sse(reply: FastifyReply): void {
+  reply.raw.writeHead(200, {
+    'content-type': 'text/event-stream; charset=utf-8',
+    'cache-control': 'no-cache, no-transform',
+    connection: 'keep-alive',
+    'x-accel-buffering': 'no',
+  });
+  reply.raw.flushHeaders?.();
+}
+
+function sseWrite(reply: FastifyReply, data: unknown): void {
+  if (reply.raw.writableEnded) return;
+  reply.raw.write(`data: ${JSON.stringify(data)}\n\n`);
+}
+
+function bad(reply: FastifyReply, message: string, status = 400): void {
+  reply.code(status).send({ error: message });
+}
+
+export async function registerRoutes(app: FastifyInstance): Promise<void> {
+  app.addHook('preHandler', async (request, reply) => {
+    const path = request.url.split('?')[0];
+    if (!path.startsWith('/api')) return;
+    if (PUBLIC_PATHS.has(path)) return;
+    if (!isAuthed(request)) {
+      reply.code(401).send({ error: 'Sign in to continue.' });
+      return;
+    }
+    if (request.method !== 'GET' && request.method !== 'HEAD' && !isSameOrigin(request)) {
+      reply.code(403).send({ error: 'Request rejected: cross-origin write.' });
+    }
+  });
+
+  /* ---------------- health & auth ---------------- */
+
+  app.get('/api/health', async () => ({
+    ok: true,
+    version: APP_VERSION,
+    setupRequired: !ownerExists(),
+    uptime: Math.round(process.uptime()),
+  }));
+
+  app.get('/api/auth/state', async (request) => {
+    const settings = getSettings();
+    return {
+      setupRequired: !ownerExists(),
+      authed: isAuthed(request),
+      ownerName: getOwner()?.name ?? null,
+      companionName: settings.companion.name,
+      tagline: settings.companion.tagline,
+    };
+  });
+
+  app.post('/api/auth/setup', async (request, reply) => {
+    if (ownerExists()) return bad(reply, 'An owner is already configured.', 409);
+    const body = (request.body ?? {}) as { name?: string; passphrase?: string };
+    if (!body.passphrase || body.passphrase.length < 8) {
+      return bad(reply, 'Choose a passphrase with at least 8 characters.');
+    }
+    createOwner(body.name ?? 'Owner', body.passphrase);
+    saveSettings({ owner: { name: (body.name ?? 'Owner').trim() || 'Owner' } });
+    const token = createSession();
+    setSessionCookie(reply, token);
+    logActivity({ level: 'info', category: 'system', message: 'BLOBS was initialised by its owner.' });
+    notify({ title: `Welcome to ${getSettings().companion.name}`, body: 'Start with a voice session, or add a model key in Settings.', level: 'success' });
+    return { ok: true };
+  });
+
+  app.post('/api/auth/login', async (request, reply) => {
+    const body = (request.body ?? {}) as { passphrase?: string };
+    const ip = request.ip;
+    if (!loginAllowed(ip)) return bad(reply, 'Too many attempts. Wait a minute and try again.', 429);
+    if (!body.passphrase || !verifyPassphrase(body.passphrase)) {
+      recordFailedLogin(ip);
+      return bad(reply, 'That passphrase is not correct.', 401);
+    }
+    const token = createSession();
+    setSessionCookie(reply, token);
+    return { ok: true };
+  });
+
+  app.post('/api/auth/logout', async (request, reply) => {
+    destroySession(sessionToken(request));
+    clearSessionCookie(reply);
+    return { ok: true };
+  });
+
+  app.post('/api/auth/passphrase', async (request, reply) => {
+    const body = (request.body ?? {}) as { current?: string; next?: string };
+    try {
+      changePassphrase(body.current ?? '', body.next ?? '');
+      logActivity({ level: 'warn', category: 'security', message: 'Owner passphrase changed; all sessions signed out.' });
+      return { ok: true };
+    } catch (error) {
+      return bad(reply, (error as Error).message);
+    }
+  });
+
+  /* ---------------- overview ---------------- */
+
+  app.get('/api/overview', async () => {
+    const settings = getSettings();
+    return {
+      companion: settings.companion,
+      owner: settings.owner,
+      model: {
+        provider: settings.model.provider,
+        label: activeModelLabel(settings),
+        hasKey: providerApiKey(settings.model.provider) !== null,
+      },
+      autonomy: {
+        level: settings.autonomy.level,
+        state: settings.autonomy.state,
+        backgroundEnabled: settings.autonomy.backgroundEnabled,
+      },
+      tasks: taskStats(),
+      memory: memoryStats(),
+      activity: activityCounts(),
+      unread: unreadNotifications(),
+      approvals: listApprovals('pending').length,
+      conversations: Number(get<{ n: number }>('SELECT COUNT(*) AS n FROM conversations')?.n ?? 0),
+      usage: usageSummary(),
+      scheduler: schedulerState(),
+      tools: toolCatalog().length,
+      email: emailStatus(),
+      phone: phoneStatus(),
+      notifications: { browser: settings.notifications.browser },
+      computer: computerStatus(),
+    };
+  });
+
+  /* ---------------- conversations & chat ---------------- */
+
+  app.get('/api/conversations', async () => listConversations());
+
+  app.get('/api/conversations/:id', async (request, reply) => {
+    const { id } = request.params as { id: string };
+    const found = getConversation(id);
+    if (!found) return bad(reply, 'Conversation not found.', 404);
+    return found;
+  });
+
+  app.post('/api/conversations/:id/summarise', async (request, reply) => {
+    const { id } = request.params as { id: string };
+    await summariseConversation(id);
+    return { ok: true };
+  });
+
+  app.delete('/api/conversations/:id', async (request) => {
+    const { id } = request.params as { id: string };
+    run('DELETE FROM conversations WHERE id = ?', id);
+    return { ok: true };
+  });
+
+  app.post('/api/chat', async (request, reply) => {
+    const body = (request.body ?? {}) as { conversationId?: string; text?: string; voice?: boolean };
+    sse(reply);
+    const controller = new AbortController();
+    const onClose = (): void => {
+      if (!reply.raw.writableEnded) controller.abort();
+    };
+    request.raw.on('close', onClose);
+
+    try {
+      for await (const event of runTurn({
+        conversationId: body.conversationId ?? null,
+        text: String(body.text ?? ''),
+        voice: Boolean(body.voice),
+        signal: controller.signal,
+      })) {
+        sseWrite(reply, event);
+      }
+    } catch (error) {
+      sseWrite(reply, { type: 'error', message: (error as Error).message });
+    } finally {
+      request.raw.off('close', onClose);
+      if (!reply.raw.writableEnded) reply.raw.end();
+    }
+    return reply;
+  });
+
+  app.get('/api/events', async (request, reply) => {
+    sse(reply);
+    sseWrite(reply, { type: 'hello', data: { ts: now() } });
+    const unsubscribe = subscribe((event) => sseWrite(reply, event));
+    const heartbeat = setInterval(() => {
+      if (!reply.raw.writableEnded) reply.raw.write(': ping\n\n');
+    }, 25_000);
+    const cleanup = (): void => {
+      clearInterval(heartbeat);
+      unsubscribe();
+    };
+    request.raw.on('close', cleanup);
+    request.raw.on('error', cleanup);
+    return reply;
+  });
+
+  /* ---------------- tasks ---------------- */
+
+  app.get('/api/tasks', async (request) => {
+    const query = request.query as { status?: string };
+    const rows = listTaskRows(query.status);
+    return rows.map((task) => {
+      const steps = all<{ status: string }>('SELECT status FROM task_steps WHERE task_id = ?', task.id);
+      return {
+        ...task,
+        schedule: task.schedule,
+        step_total: steps.length,
+        step_done: steps.filter((step) => step.status === 'done').length,
+      };
+    });
+  });
+
+  app.post('/api/tasks', async (request, reply) => {
+    const body = (request.body ?? {}) as {
+      title?: string;
+      objective?: string;
+      projectId?: string;
+      schedule?: unknown;
+    };
+    if (!body.objective?.trim()) return bad(reply, 'An objective is required.');
+    const task = createTask({
+      title: body.title?.trim() || body.objective.slice(0, 70),
+      objective: body.objective.trim(),
+      projectId: body.projectId || null,
+      schedule: normalizeSchedule(body.schedule),
+      origin: 'owner',
+    });
+    return { ok: true, task };
+  });
+
+  app.get('/api/tasks/:id', async (request, reply) => {
+    const { id } = request.params as { id: string };
+    const detail = taskDetail(id);
+    if (!detail) return bad(reply, 'Task not found.', 404);
+    return detail;
+  });
+
+  app.post('/api/tasks/:id/:action', async (request, reply) => {
+    const { id, action } = request.params as { id: string; action: string };
+    const task = getTask(id);
+    if (!task) return bad(reply, 'Task not found.', 404);
+    if (action === 'run') {
+      run("UPDATE tasks SET status = 'queued', next_run_at = ?, error = NULL WHERE id = ?", now(), id);
+      void executeTask(id);
+      return { ok: true };
+    }
+    if (action === 'cancel') {
+      cancelTask(id);
+      return { ok: true };
+    }
+    if (action === 'pause') {
+      pauseTask(id);
+      return { ok: true };
+    }
+    if (action === 'resume') {
+      resumeTask(id);
+      return { ok: true };
+    }
+    if (action === 'retry') {
+      retryTask(id);
+      return { ok: true };
+    }
+    return bad(reply, 'Unknown action.');
+  });
+
+  app.delete('/api/tasks/:id', async (request) => {
+    const { id } = request.params as { id: string };
+    run('DELETE FROM tasks WHERE id = ?', id);
+    return { ok: true };
+  });
+
+  /* ---------------- projects ---------------- */
+
+  app.get('/api/projects', async () => listProjects());
+
+  app.post('/api/projects', async (request, reply) => {
+    const body = (request.body ?? {}) as { title?: string; objective?: string; notes?: string };
+    if (!body.title?.trim()) return bad(reply, 'A title is required.');
+    return { ok: true, project: createProject({ title: body.title, objective: body.objective, notes: body.notes }) };
+  });
+
+  app.patch('/api/projects/:id', async (request, reply) => {
+    const { id } = request.params as { id: string };
+    const body = (request.body ?? {}) as {
+      title?: string;
+      objective?: string;
+      status?: 'active' | 'paused' | 'done';
+      notes?: string;
+      notesAppend?: string;
+    };
+    const project = updateProject(id, body);
+    if (!project) return bad(reply, 'Project not found.', 404);
+    return { ok: true, project };
+  });
+
+  app.delete('/api/projects/:id', async (request) => {
+    const { id } = request.params as { id: string };
+    deleteProject(id);
+    return { ok: true };
+  });
+
+  /* ---------------- memory ---------------- */
+
+  app.get('/api/memory', async (request) => {
+    const query = request.query as { query?: string; kind?: string; limit?: string };
+    const limit = clamp(Number(query.limit ?? 200), 1, 500);
+    if (query.query?.trim()) {
+      return { items: searchMemories(query.query.trim(), limit), stats: memoryStats() };
+    }
+    return { items: listMemories({ limit, kind: query.kind }), stats: memoryStats() };
+  });
+
+  app.post('/api/memory', async (request, reply) => {
+    const body = (request.body ?? {}) as {
+      content?: string;
+      kind?: string;
+      tags?: string[];
+      importance?: number;
+      pinned?: boolean;
+    };
+    if (!body.content?.trim()) return bad(reply, 'Memory content is required.');
+    const row = remember({
+      content: body.content,
+      kind: (body.kind as 'fact') ?? 'fact',
+      tags: body.tags ?? [],
+      importance: body.importance ?? 3,
+      pinned: body.pinned,
+      source: 'owner',
+    });
+    return { ok: true, memory: row };
+  });
+
+  app.patch('/api/memory/:id', async (request, reply) => {
+    const { id } = request.params as { id: string };
+    const body = (request.body ?? {}) as {
+      content?: string;
+      kind?: string;
+      tags?: string[];
+      importance?: number;
+      pinned?: boolean;
+    };
+    const row = updateMemory(id, {
+      content: body.content,
+      kind: body.kind as 'fact',
+      tags: body.tags,
+      importance: body.importance,
+      pinned: body.pinned,
+    });
+    if (!row) return bad(reply, 'Memory not found.', 404);
+    return { ok: true, memory: row };
+  });
+
+  app.delete('/api/memory/:id', async (request) => {
+    const { id } = request.params as { id: string };
+    deleteMemory(id);
+    return { ok: true };
+  });
+
+  /* ---------------- activity, notifications & approvals ---------------- */
+
+  app.get('/api/activity', async (request) => {
+    const query = request.query as { limit?: string; category?: string; level?: string };
+    return { items: listActivity({ limit: Number(query.limit ?? 120), category: query.category, level: query.level }), counts: activityCounts() };
+  });
+
+  app.get('/api/notifications', async () => ({ items: listNotifications(), unread: unreadNotifications() }));
+
+  app.post('/api/notifications/read', async () => {
+    markNotificationsRead();
+    return { ok: true };
+  });
+
+  app.get('/api/approvals', async (request) => {
+    const query = request.query as { status?: string };
+    return { items: listApprovals((query.status as 'pending') ?? 'pending') };
+  });
+
+  app.post('/api/approvals/:id/decide', async (request, reply) => {
+    const { id } = request.params as { id: string };
+    const body = (request.body ?? {}) as { decision?: 'approved' | 'rejected'; note?: string };
+    if (body.decision !== 'approved' && body.decision !== 'rejected') return bad(reply, 'Decision must be approved or rejected.');
+    const approval = decideApproval(id, body.decision, body.note ?? '');
+    if (!approval) return bad(reply, 'That approval is no longer pending.', 409);
+
+    const payload = parseApprovalPayload(approval);
+    if (body.decision === 'approved' && payload) {
+      const settings = getSettings();
+      const result = await executeApprovedTool(payload.tool, payload.args, {
+        channel: payload.context.channel,
+        conversationId: payload.context.conversationId ?? null,
+        taskId: payload.context.taskId ?? null,
+        autonomyLevel: settings.autonomy.level,
+      });
+      run(
+        'UPDATE approvals SET decision_note = ? WHERE id = ?',
+        truncate(result.ok ? `Executed: ${result.summary}` : `Failed: ${result.content}`, 800),
+        id,
+      );
+      if (approval.task_id) {
+        resumeTaskAfterApproval(approval.task_id, payload.tool, result.content);
+      }
+    }
+
+    if (approval.conversation_id) {
+      void continueAfterApproval(approval, body.decision).catch((error: Error) => {
+        logActivity({ level: 'error', category: 'chat', message: `Approval follow-up failed: ${error.message}` });
+      });
+    }
+
+    return { ok: true, approval };
+  });
+
+  /* ---------------- communications ---------------- */
+
+  app.get('/api/comms', async (request) => {
+    const query = request.query as { channel?: string; limit?: string };
+    const limit = clamp(Number(query.limit ?? 60), 1, 200);
+    const items =
+      query.channel === 'email'
+        ? emailHistory(limit)
+        : query.channel === 'phone'
+          ? phoneHistory(limit)
+          : all('SELECT * FROM comms_events ORDER BY created_at DESC LIMIT ?', limit);
+    return { items, email: emailStatus(), phone: phoneStatus() };
+  });
+
+  app.get('/api/inbox', async () => fetchInbox(15));
+
+  /* ---------------- integrations ---------------- */
+
+  app.get('/api/integrations', async () => ({
+    items: [
+      {
+        key: 'research',
+        name: 'Web research',
+        category: 'built-in',
+        status: 'connected',
+        detail: 'DuckDuckGo/Wikipedia search plus page reading. No key required.',
+        requires: [],
+      },
+      {
+        key: 'files',
+        name: 'Workspace files & notes',
+        category: 'built-in',
+        status: 'connected',
+        detail: 'Private markdown notes and documents stored on the server.',
+        requires: [],
+      },
+      {
+        key: 'code',
+        name: 'Sandboxed code',
+        category: 'built-in',
+        status: 'connected',
+        detail: 'JavaScript compute in an isolated VM with no network or filesystem access.',
+        requires: [],
+      },
+      {
+        key: 'email',
+        name: 'Email identity',
+        category: 'communication',
+        status: emailStatus().ready ? 'connected' : 'disconnected',
+        detail: emailStatus().detail,
+        requires: ['address', 'smtpHost', 'smtpPort', 'username', 'password'],
+        config: emailConfig() ? { ...emailConfig(), password: undefined } : null,
+      },
+      {
+        key: 'phone',
+        name: 'Phone calls (Twilio)',
+        category: 'communication',
+        status: phoneStatus().ready ? 'connected' : 'disconnected',
+        detail: phoneStatus().detail,
+        requires: ['accountSid', 'authToken', 'fromNumber', 'publicBaseUrl'],
+        note: 'Twilio requires a card on file. Trial credit is typically enough for a few test calls; it is not free indefinitely.',
+      },
+      {
+        key: 'computer',
+        name: 'Cloud computer (E2B)',
+        category: 'computer',
+        status: computerStatus().configured ? 'connected' : 'disconnected',
+        detail: computerStatus().detail,
+        requires: ['apiKey'],
+        note: 'E2B gives BLOBS its own isolated Linux machine: shell, any language, packages, long-running servers and a graphical desktop. It has a free credit allowance; heavier use is billed by E2B. The owner\'s own computer is never touched.',
+        config: {
+          sandboxId: computerStatus().sandboxId,
+          desktopId: computerStatus().desktopId,
+          timeoutMinutes: computerStatus().timeoutMinutes,
+        },
+      },
+      {
+        key: 'messaging',
+        name: 'Messaging (WhatsApp / SMS)',
+        category: 'communication',
+        status: 'unavailable',
+        detail:
+          'Every real messaging channel needs a paid provider or business verification. BLOBS will not fake this — connect Twilio later for SMS if you want it.',
+        requires: [],
+      },
+    ],
+  }));
+
+  app.post('/api/integrations/email', async (request, reply) => {
+    const body = (request.body ?? {}) as Record<string, string | number | boolean>;
+    const address = String(body.address ?? '').trim();
+    const smtpHost = String(body.smtpHost ?? '').trim();
+    const username = String(body.username ?? address).trim();
+    const password = String(body.password ?? '');
+    if (!address || !smtpHost) return bad(reply, 'Address and SMTP host are required.');
+    saveEmailConfig({
+      address,
+      displayName: String(body.displayName ?? getSettings().companion.name),
+      smtpHost,
+      smtpPort: Number(body.smtpPort ?? 587),
+      smtpSecure: Boolean(body.smtpSecure),
+      imapHost: String(body.imapHost ?? smtpHost),
+      imapPort: Number(body.imapPort ?? 993),
+      username,
+    });
+    if (password) setSecret('email:password', password);
+    return { ok: true, status: emailStatus() };
+  });
+
+  app.delete('/api/integrations/email', async () => {
+    disconnectEmail();
+    return { ok: true };
+  });
+
+  app.post('/api/integrations/email/test', async (request, reply) => {
+    const body = (request.body ?? {}) as { to?: string };
+    const to = body.to || emailConfig()?.address;
+    if (!to) return bad(reply, 'No address to test with.');
+    const result = await sendEmail({
+      to,
+      subject: `${getSettings().companion.name} connectivity test`,
+      body: 'This is a test message confirming that your BLOBS email identity can send mail.',
+    });
+    if (!result.ok) return bad(reply, result.error ?? 'Send failed.', 502);
+    return { ok: true };
+  });
+
+  app.get('/api/integrations/email/inbox', async () => fetchInbox(15));
+
+  app.post('/api/integrations/phone', async (request, reply) => {
+    const body = (request.body ?? {}) as Record<string, string>;
+    if (!body.accountSid || !body.authToken || !body.fromNumber || !body.publicBaseUrl) {
+      return bad(reply, 'Account SID, auth token, from number and public base URL are required.');
+    }
+    savePhoneConfig(
+      {
+        accountSid: body.accountSid,
+        fromNumber: body.fromNumber,
+        ownerNumber: body.ownerNumber ?? '',
+        publicBaseUrl: body.publicBaseUrl,
+        voice: body.voice ?? 'Polly.Joanna',
+      },
+      body.authToken,
+    );
+    return { ok: true, status: phoneStatus() };
+  });
+
+  app.delete('/api/integrations/phone', async () => {
+    disconnectPhone();
+    return { ok: true };
+  });
+
+  /* ---------------- cloud computer (E2B) ---------------- */
+
+  app.get('/api/computer/status', async () => computerStatus());
+
+  app.post('/api/integrations/computer', async (request, reply) => {
+    const body = (request.body ?? {}) as { apiKey?: string };
+    if (!body.apiKey?.trim()) return bad(reply, 'Paste an E2B API key first.');
+    saveComputerKey(body.apiKey.trim());
+    logActivity({ level: 'info', category: 'integration', message: 'Connected the E2B cloud computer.' });
+    return { ok: true, status: computerStatus() };
+  });
+
+  app.delete('/api/integrations/computer', async () => {
+    await disconnectComputer();
+    return { ok: true, status: computerStatus() };
+  });
+
+  app.post('/api/integrations/computer/reset', async () => {
+    const result = await resetComputer();
+    logActivity({
+      level: 'warn',
+      category: 'integration',
+      message: `Reset the cloud computer (${result.killed.length} sandbox(es) killed).`,
+    });
+    return { ok: true, ...result, status: computerStatus() };
+  });
+
+  app.post('/api/computer/screenshot', async (_request, reply) => {
+    try {
+      const result = await desktopAction({ action: 'screenshot' });
+      return { ok: true, message: result.message, ts: now() };
+    } catch (error) {
+      return bad(reply, (error as Error).message, 502);
+    }
+  });
+
+  app.get('/api/computer/screenshot', async (_request, reply) => {
+    try {
+      const data = await fs.promises.readFile(screenshotPath());
+      reply.type('image/png').header('cache-control', 'no-store').send(data);
+      return reply;
+    } catch {
+      return bad(reply, 'No screenshot has been taken yet.', 404);
+    }
+  });
+
+  /* ---------------- voice webhooks (Twilio) ---------------- */
+
+  app.post('/api/voice/twiml', async (request, reply) => {
+    const query = request.query as { call?: string; inbound?: string; k?: string };
+    const expected = getSecret('phone:webhookKey');
+    if (!expected || query.k !== expected) {
+      reply.code(403).type('text/plain').send('Forbidden');
+      return reply;
+    }
+    const body = (request.body ?? {}) as Record<string, string>;
+    const speech = (body.SpeechResult ?? '').trim();
+    const peer = body.From ?? 'unknown';
+
+    reply.type('text/xml');
+
+    if (query.call) {
+      if (!speech) {
+        const xml = outboundTwiml(query.call);
+        if (!xml) return reply.code(404).send(twimlSay('That call is no longer available.'));
+        return xml;
+      }
+      const conversationId = `phone_${query.call}`;
+      const answer = await drainVoiceTurn(conversationId, speech, peer);
+      const phone = phoneStatus();
+      const action = phone.ready ? `${phoneBaseUrl()}/api/voice/twiml?call=${encodeURIComponent(query.call)}&k=${encodeURIComponent(expected)}` : undefined;
+      return twimlSay(answer, { gather: true, action });
+    }
+
+    if (query.inbound) {
+      if (!speech) return inboundTwiml();
+      const conversationId = `phone_in_${peer.replace(/\D/g, '').slice(-10)}`;
+      const answer = await drainVoiceTurn(conversationId, speech, peer, true);
+      const action = `${phoneBaseUrl()}/api/voice/twiml?inbound=1&k=${encodeURIComponent(expected)}`;
+      return twimlSay(answer, { gather: true, action });
+    }
+
+    return inboundTwiml();
+  });
+
+  /* ---------------- settings ---------------- */
+
+  app.get('/api/settings', async () => ({
+    settings: getSettings(),
+    defaults: DEFAULT_SETTINGS,
+    providers: providerCatalog(),
+    providerNotes: Object.fromEntries(Object.entries(PROVIDERS).map(([key, value]) => [key, value.note])),
+    usage: usageSummary(),
+    secrets: { hasEmailPassword: getSecret('email:password') !== null, hasPhoneToken: getSecret('phone:authToken') !== null },
+    version: APP_VERSION,
+  }));
+
+  app.patch('/api/settings', async (request) => {
+    const saved = saveSettings(request.body ?? {});
+    logActivity({ level: 'info', category: 'settings', message: 'Settings updated.' });
+    return { ok: true, settings: saved };
+  });
+
+  app.post('/api/settings/provider-key', async (request, reply) => {
+    const body = (request.body ?? {}) as { provider?: string; key?: string };
+    if (!body.provider || !PROVIDERS[body.provider]) return bad(reply, 'Unknown provider.');
+    if (!body.key?.trim()) return bad(reply, 'Paste the API key first.');
+    setSecret(`provider:${body.provider}`, body.key.trim());
+    logActivity({ level: 'info', category: 'settings', message: `Saved an API key for ${PROVIDERS[body.provider].label}.` });
+    return { ok: true, providers: providerCatalog() };
+  });
+
+  app.delete('/api/settings/provider-key/:provider', async (request) => {
+    const { provider } = request.params as { provider: string };
+    setSecret(`provider:${provider}`, null);
+    return { ok: true, providers: providerCatalog() };
+  });
+
+  app.post('/api/settings/test-provider', async (request, reply) => {
+    const body = (request.body ?? {}) as { provider?: string };
+    if (!body.provider) return bad(reply, 'Choose a provider.');
+    const result = await testProvider(body.provider);
+    if (!result.ok) return bad(reply, result.message, 502);
+    return result;
+  });
+
+  app.post('/api/settings/autonomy', async (request, reply) => {
+    const body = (request.body ?? {}) as { state?: 'active' | 'paused' | 'stopped' };
+    if (!body.state || !['active', 'paused', 'stopped'].includes(body.state)) return bad(reply, 'Invalid state.');
+    saveSettings({ autonomy: { state: body.state } });
+    const message =
+      body.state === 'stopped'
+        ? 'Emergency stop engaged: autonomous work halted.'
+        : body.state === 'paused'
+          ? 'Autonomy paused: current step finishes, nothing new starts.'
+          : 'Autonomy resumed.';
+    logActivity({ level: 'warn', category: 'security', message });
+    return { ok: true, state: body.state };
+  });
+
+  app.get('/api/settings/tools', async () => toolCatalog());
+}
+
+/* ---------------- voice helpers ---------------- */
+
+function phoneBaseUrl(): string {
+  const config = get<{ config: string }>("SELECT config FROM integrations WHERE key = 'phone'");
+  if (!config?.config) return '';
+  try {
+    return String((JSON.parse(config.config) as { publicBaseUrl?: string }).publicBaseUrl ?? '').replace(/\/$/, '');
+  } catch {
+    return '';
+  }
+}
+
+async function drainVoiceTurn(
+  conversationId: string,
+  speech: string,
+  peer: string,
+  inbound = false,
+): Promise<string> {
+  let text = '';
+  for await (const event of runTurn({ conversationId, text: speech, voice: true, channel: 'phone' })) {
+    if (event.type === 'text') text += event.delta;
+  }
+  const settings = getSettings();
+  const clean = text.replace(/[*_#`]/g, '').replace(/\s+/g, ' ').trim();
+  const spoken = clean || 'I am here, but I could not produce a reply just now. Let me try again on the website.';
+  run(
+    `INSERT INTO comms_events(id, channel, direction, peer, subject, body, status, external_id, meta, created_at)
+     VALUES (?, 'phone', ?, ?, ?, ?, 'completed', ?, ?, ?)`,
+    `cm_${Date.now().toString(36)}${Math.random().toString(36).slice(2, 7)}`,
+    inbound ? 'inbound' : 'outbound',
+    peer,
+    inbound ? 'Incoming call' : 'Outgoing call',
+    spoken,
+    conversationId,
+    JSON.stringify({ model: settings.model.model }),
+    now(),
+  );
+  return spoken.slice(0, 1200);
+}
+
+export const routeHelpers = { sse, sseWrite, bad };

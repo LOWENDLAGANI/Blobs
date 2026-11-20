@@ -1,0 +1,38 @@
+{
+  "name": "blobs",
+  "version": "1.0.0",
+  "private": true,
+  "type": "module",
+  "description": "BLOBS — a persistent, voice-first personal AI agent that remembers, plans and works in the background.",
+  "engines": {
+    "node": ">=22.6"
+  },
+  "scripts": {
+    "dev": "node --watch server/index.ts",
+    "web": "vite",
+    "build": "vite build",
+    "start": "node server/index.ts",
+    "typecheck": "tsc --noEmit",
+    "smoke": "node scripts/smoke.ts"
+  },
+  "dependencies": {
+    "@e2b/desktop": "^2.5.0",
+    "@fastify/cookie": "^11.0.2",
+    "@fastify/static": "^8.0.4",
+    "e2b": "^2.64.0",
+    "fastify": "^5.2.1",
+    "imapflow": "^1.0.179",
+    "nodemailer": "^6.9.16"
+  },
+  "devDependencies": {
+    "@types/node": "^22.10.5",
+    "@types/nodemailer": "^6.4.17",
+    "@types/react": "^19.0.7",
+    "@types/react-dom": "^19.0.3",
+    "@vitejs/plugin-react": "^4.3.4",
+    "react": "^19.0.0",
+    "react-dom": "^19.0.0",
+    "typescript": "^5.7.3",
+    "vite": "^6.0.7"
+  }
+}
