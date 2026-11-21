@@ -164,6 +164,7 @@ npm run deploy:daytona          # create (or reuse) the sandbox, build, start, p
 
 node scripts/daytona.ts status  # sandbox state and public URL
 node scripts/daytona.ts logs    # last 200 lines of the server log
+node scripts/daytona.ts backup  # download .data (database, workspace, secret.key)
 node scripts/daytona.ts stop    # take it offline; the disk, database and workspace are kept
 node scripts/daytona.ts start   # bring the same sandbox back and relaunch BLOBS
 node scripts/daytona.ts destroy # delete the sandbox and everything on it
@@ -175,12 +176,18 @@ the code, and leaves `.data/` alone — memory, tasks and encrypted integration 
 URL are recorded in `.daytona.json` (git-ignored). If you create the sandbox in the Daytona dashboard instead, set
 **auto-stop to `0`** yourself.
 
+The server runs under a small supervisor inside the sandbox: if it crashes it restarts after three seconds, and
+`server.log` is rotated to `server.log.1` once it passes 5 MB. `backup` downloads `.data` — the database, the workspace
+and `secret.key` — into `.data/backups/` on this machine, or to the path you pass after `backup`.
+
 What to keep in mind:
 
 - The preview URL is public. BLOBS still asks for the owner passphrase, so make that passphrase strong: it is the only
   thing in front of the login. Stop the sandbox or remove the preview endpoint to take it offline.
 - Without auto-stop, the sandbox bills for as long as it runs. The script clears the idle policy, but a project-level
-  wall-clock timeout can still apply — check Daytona's pricing and lifecycle defaults before leaving it up.
+  wall-clock timeout can still apply — check Daytona's pricing and lifecycle defaults before leaving it up. To keep the
+  quiet hours free, stop it from your own cron (`0 1 * * * cd /path/to/Blobs && node scripts/daytona.ts stop`) and
+  start it again in the morning (`0 8 * * *`). Scheduled tasks do not run while the sandbox is stopped.
 - The disk survives `stop`/`start`, not `destroy`. For memory that outlives the sandbox, point `DB_URL` at Turso (above)
   or keep a copy of `.data/`.
 - Your local `.env` is read at deploy time and passed to the remote server process. It is not uploaded as a file, and

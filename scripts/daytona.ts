@@ -17,6 +17,7 @@
  *   npm run deploy:daytona           create/reuse the sandbox, build, start, print URL
  *   node scripts/daytona.ts status   sandbox state and public URL
  *   node scripts/daytona.ts logs     last 200 lines of the server log
+ *   node scripts/daytona.ts backup   download .data (database, workspace, secret.key)
  *   node scripts/daytona.ts stop     stop the sandbox, keeping its disk
  *   node scripts/daytona.ts start    start the same sandbox and relaunch BLOBS
  *   node scripts/daytona.ts destroy  delete the sandbox and everything on it
@@ -251,10 +252,30 @@ async function writeHostState(sandbox: Sandbox, dir: string, url: string): Promi
   await sh(sandbox, `printf %s '${payload}' | base64 -d > .daytona.json`, { cwd: dir });
 }
 
+const LOG_LIMIT_BYTES = 5_000_000;
+
+/**
+ * What actually runs detached in the sandbox: a supervisor around the server,
+ * not the bare process. A crash restarts it after three seconds instead of
+ * leaving the agent silently offline, and the log is rotated past 5 MB so the
+ * sandbox disk cannot fill up with one file. Stops are still clean: `killAll`
+ * removes the tagged loop and everything it started.
+ */
+const SUPERVISOR = [
+  'mkdir -p .data',
+  'while true; do',
+  `if [ -f .data/server.log ] && [ "$(stat -c%s .data/server.log)" -gt ${LOG_LIMIT_BYTES} ]; then mv -f .data/server.log .data/server.log.1; fi`,
+  'node server/index.ts >> .data/server.log 2>&1',
+  'code=$?',
+  'printf "[supervisor] server exited with %s at %s; restarting in 3s\\n" "$code" "$(date -u +%FT%TZ)" >> .data/server.log',
+  'sleep 3',
+  'done',
+].join('; ');
+
 async function startApp(sandbox: Sandbox, dir: string): Promise<void> {
   await sandbox.process.killAll({ tag: TAG }).catch(() => undefined);
-  say('Launching the BLOBS server…');
-  await sandbox.process.start('mkdir -p .data && exec node server/index.ts >> .data/server.log 2>&1', {
+  say('Launching the BLOBS server under its supervisor…');
+  await sandbox.process.start(SUPERVISOR, {
     cwd: dir,
     env: appEnv(),
     tag: TAG,
@@ -337,6 +358,38 @@ async function logs(daytona: Daytona): Promise<void> {
   console.log(result.stdout || result.stderr || '(the server log is empty)');
 }
 
+/**
+ * Pull `.data` out of the sandbox: the SQLite database, the file workspace and
+ * secret.key (which decrypts stored integration credentials). Without this,
+ * `destroy` is the only copy gone.
+ */
+async function backup(daytona: Daytona): Promise<void> {
+  const sandbox = await resolveSandbox(daytona, false);
+  if (!sandbox) throw new Error('No BLOBS sandbox yet. Run "npm run deploy:daytona".');
+  const dir = await appDir(sandbox);
+  const stamp = new Date().toISOString().replace(/[:.]/g, '-');
+  const destination = process.argv[3]
+    ? path.resolve(process.argv[3])
+    : path.join(ROOT, '.data', 'backups', `blobs-data-${stamp}.tgz`);
+  fs.mkdirSync(path.dirname(destination), { recursive: true });
+  const remote = path.posix.join(dir, `blobs-data-${stamp}.tgz`);
+
+  say('Archiving .data inside the sandbox…');
+  await sh(sandbox, `tar -czf "${remote}" .data`, { cwd: dir, timeoutSeconds: 300 });
+  try {
+    say('Downloading the archive…');
+    await sandbox.fs.downloadFile(remote, destination);
+  } finally {
+    await sandbox.process.run(`rm -f "${remote}"`, { cwd: dir, timeoutSeconds: 20 }).catch(() => undefined);
+  }
+
+  const relative = path.relative(ROOT, destination);
+  const shown = relative.startsWith('..') ? destination : relative;
+  const megabytes = fs.statSync(destination).size / (1024 * 1024);
+  say(`Backup saved to ${shown} (${megabytes.toFixed(1)} MB).`);
+  say('It holds the database, workspace and secret.key — keep it private, the key decrypts stored credentials.');
+}
+
 async function stop(daytona: Daytona): Promise<void> {
   const sandbox = await resolveSandbox(daytona, false);
   if (!sandbox) throw new Error('No BLOBS sandbox yet. Run "npm run deploy:daytona".');
@@ -374,13 +427,14 @@ async function main(): Promise<void> {
     deploy,
     status,
     logs,
+    backup,
     stop,
     start,
     destroy,
   };
   const action = commands[command];
   if (!action) {
-    throw new Error(`Unknown command "${command}". Use deploy, status, logs, stop, start or destroy.`);
+    throw new Error(`Unknown command "${command}". Use deploy, status, logs, backup, stop, start or destroy.`);
   }
 
   loadDotEnv();

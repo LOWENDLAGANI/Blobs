@@ -119,7 +119,10 @@ export function setSessionCookie(reply: FastifyReply, token: string): void {
     path: '/',
     httpOnly: true,
     sameSite: 'lax',
-    secure: false,
+    // Set behind HTTPS (the Daytona preview proxy forwards the proto with
+    // trustProxy on) but left off on plain-http localhost, where a secure
+    // cookie would never be sent back.
+    secure: reply.request.protocol === 'https',
     maxAge: SESSION_DAYS * 86_400,
   });
 }
