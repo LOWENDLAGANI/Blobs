@@ -193,6 +193,47 @@ export interface ApprovalItem {
   decision_note: string | null;
 }
 
+export interface WatchItem {
+  id: string;
+  kind: 'url' | 'rss' | 'search';
+  target: string;
+  label: string;
+  cadence_minutes: number;
+  status: 'active' | 'paused';
+  notify_on_change: number;
+  create_task_on_change: number;
+  last_checked_at: number | null;
+  last_change_at: number | null;
+  last_summary: string | null;
+  created_at: number;
+  updated_at: number;
+}
+
+export interface ResearchRun {
+  id: string;
+  question: string;
+  depth: 'quick' | 'deep';
+  status: string;
+  source_count: number;
+  claim_count: number;
+  deliverable_id: string | null;
+  error: string | null;
+  created_at: number;
+  finished_at: number | null;
+}
+
+export interface ResearchSource {
+  id: string;
+  run_id: string;
+  idx: number;
+  url: string;
+  title: string | null;
+  domain: string | null;
+  published: string | null;
+  excerpt: string | null;
+  retrieved_at: number;
+}
+
 export interface CommsItem {
   id: string;
   channel: string;

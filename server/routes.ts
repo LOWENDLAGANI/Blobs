@@ -70,6 +70,8 @@ import {
   taskStats,
 } from './agent/tasks.ts';
 import { executeApprovedTool } from './agent/core.ts';
+import { checkWatch, createWatch, deleteWatch, listWatches, updateWatch } from './watches.ts';
+import { researchRunDetail, researchRuns } from './research.ts';
 import { createProject, deleteProject, listProjects, updateProject } from './agent/projects.ts';
 import {
   createResponsibility,
@@ -610,6 +612,74 @@ export async function registerRoutes(app: FastifyInstance): Promise<void> {
     }
 
     return { ok: true, approval };
+  });
+
+  /* ---------------- watches & research ---------------- */
+
+  app.get('/api/watches', async () => ({ items: await listWatches() }));
+
+  app.post('/api/watches', async (request, reply) => {
+    const body = (request.body ?? {}) as {
+      kind?: string;
+      target?: string;
+      label?: string;
+      cadence_minutes?: number;
+      notify?: boolean;
+      create_task?: boolean;
+    };
+    const kind = body.kind === 'url' || body.kind === 'rss' || body.kind === 'search' ? body.kind : null;
+    if (!kind) return bad(reply, 'Choose url, rss or search.');
+    const target = String(body.target ?? '').trim();
+    if (!target) return bad(reply, 'Give the watch a URL, feed or query.');
+    const watch = await createWatch({
+      kind,
+      target,
+      label: body.label,
+      cadenceMinutes: Number(body.cadence_minutes ?? 360),
+      notifyOnChange: body.notify !== false,
+      createTaskOnChange: body.create_task !== false,
+    });
+    return { ok: true, watch };
+  });
+
+  app.patch('/api/watches/:id', async (request, reply) => {
+    const body = (request.body ?? {}) as {
+      status?: string;
+      label?: string;
+      target?: string;
+      cadence_minutes?: number;
+      notify?: boolean;
+      create_task?: boolean;
+    };
+    const watch = await updateWatch((request.params as { id: string }).id, {
+      status: body.status === 'paused' ? 'paused' : body.status === 'active' ? 'active' : undefined,
+      label: body.label,
+      target: body.target,
+      cadenceMinutes: body.cadence_minutes === undefined ? undefined : Number(body.cadence_minutes),
+      notifyOnChange: body.notify === undefined ? undefined : body.notify !== false,
+      createTaskOnChange: body.create_task === undefined ? undefined : body.create_task !== false,
+    });
+    return watch ? { ok: true, watch } : bad(reply, 'No such watch.', 404);
+  });
+
+  app.delete('/api/watches/:id', async (request) => ({
+    ok: await deleteWatch((request.params as { id: string }).id),
+  }));
+
+  app.post('/api/watches/:id/run', async (request, reply) => {
+    const result = await checkWatch((request.params as { id: string }).id);
+    return result ?? bad(reply, 'No such watch.', 404);
+  });
+
+  app.get('/api/research', async (request) => {
+    const query = request.query as { limit?: string };
+    const limit = Math.min(Math.max(Number(query.limit ?? 20), 1), 100);
+    return { items: await researchRuns(limit) };
+  });
+
+  app.get('/api/research/:id', async (request, reply) => {
+    const detail = await researchRunDetail((request.params as { id: string }).id);
+    return detail ?? bad(reply, 'No such research run.', 404);
   });
 
   /* ---------------- communications ---------------- */

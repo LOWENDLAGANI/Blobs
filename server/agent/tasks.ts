@@ -6,6 +6,7 @@ import { id, now, safeJson, sleep, truncate } from '../util.ts';
 import { buildSystemPrompt } from './prompt.ts';
 import { agentLoop, drainAgent } from './core.ts';
 import { TOOL_NAMES } from './tools.ts';
+import { createDeliverable } from '../deliverables.ts';
 import type { LlmMessage } from '../llm/types.ts';
 
 export type TaskStatus =
@@ -718,6 +719,22 @@ export async function executeTask(taskId: string): Promise<void> {
         result: truncate(lastOutput, 8000),
         checkpoint: JSON.stringify({ stepIndex, approvedResults }),
       });
+      // A completed run must leave something reviewable behind. If the agent
+      // did not deliver a packet itself, hand the outcome over as one.
+      if (task.origin !== 'responsibility' && lastOutput.trim().length > 120) {
+        const existing = await get<{ id: string }>(
+          'SELECT id FROM deliverables WHERE task_id = ? LIMIT 1',
+          taskId,
+        );
+        if (!existing) {
+          await createDeliverable({
+            title: task.title,
+            body: `# ${task.title}\n\n${lastOutput.trim()}`,
+            taskId,
+            silent: true,
+          });
+        }
+      }
       logActivity({ level: 'success', category: 'task', message: `Completed "${task.title}".`, taskId });
       if (getSettings().notifications.notifyOnTaskComplete) {
         notify({

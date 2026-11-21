@@ -304,3 +304,23 @@ create table if not exists research_claims (
   created_at bigint not null
 );
 create index if not exists idx_research_claims_run on research_claims(run_id, source_idx);
+
+-- Proactive watches: a page, feed or search checked on a cadence. A changed
+-- fingerprint notifies the owner and can queue an investigation task.
+create table if not exists watches (
+  id text primary key,
+  kind text not null,
+  target text not null,
+  label text not null default '',
+  cadence_minutes integer not null default 360,
+  status text not null default 'active',
+  notify_on_change integer not null default 1,
+  create_task_on_change integer not null default 1,
+  last_checked_at bigint,
+  last_fingerprint text,
+  last_change_at bigint,
+  last_summary text,
+  created_at bigint not null,
+  updated_at bigint not null
+);
+create index if not exists idx_watches_due on watches(status, last_checked_at);

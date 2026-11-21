@@ -5,6 +5,7 @@ import { emitLive } from './live.ts';
 import { Badge, Button, Field, Icon, Input, Orb, ToastProvider, useToast } from './ui.tsx';
 import { ConsolePage } from './pages/console.tsx';
 import { TasksPage } from './pages/tasks.tsx';
+import { WatchesPage } from './pages/watches.tsx';
 import { ReviewPage } from './pages/review.tsx';
 import { ProjectsPage } from './pages/projects.tsx';
 import { MemoryPage } from './pages/memory.tsx';
@@ -13,7 +14,17 @@ import { CommsPage } from './pages/comms.tsx';
 import { IntegrationsPage } from './pages/integrations.tsx';
 import { SettingsPage } from './pages/settings.tsx';
 
-type Route = 'console' | 'tasks' | 'review' | 'projects' | 'memory' | 'activity' | 'comms' | 'integrations' | 'settings';
+type Route =
+  | 'console'
+  | 'tasks'
+  | 'watches'
+  | 'review'
+  | 'projects'
+  | 'memory'
+  | 'activity'
+  | 'comms'
+  | 'integrations'
+  | 'settings';
 
 type AuthMode = 'supabase' | 'passphrase';
 
@@ -43,6 +54,7 @@ interface Overview {
 const NAV: { route: Route; label: string; icon: string }[] = [
   { route: 'console', label: 'Talk', icon: 'mic' },
   { route: 'tasks', label: 'Tasks', icon: 'tasks' },
+  { route: 'watches', label: 'Watches', icon: 'pulse' },
   { route: 'review', label: 'Review', icon: 'check' },
   { route: 'projects', label: 'Projects', icon: 'projects' },
   { route: 'memory', label: 'Memory', icon: 'brain' },
@@ -325,6 +337,8 @@ function Shell({ route, go, onSignOut }: { route: Route; go: (route: Route) => v
     switch (route) {
       case 'tasks':
         return <TasksPage go={go} />;
+      case 'watches':
+        return <WatchesPage />;
       case 'review':
         return <ReviewPage />;
       case 'projects':

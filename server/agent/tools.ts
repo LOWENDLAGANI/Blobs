@@ -16,6 +16,14 @@ import { assertPublicUrl, extractTitle, fetchWithTimeout, htmlToText, truncate }
 import type { ToolSchema } from '../llm/types.ts';
 import { createTask, executeTask, getTask, listTaskRows, normalizeSchedule } from './tasks.ts';
 import { webSearch, type SearchHit } from '../search.ts';
+import {
+  checkWatch,
+  createWatch,
+  deleteWatch,
+  listWatches,
+  updateWatch,
+  type WatchKind,
+} from '../watches.ts';
 import { runResearch } from '../research.ts';
 import {
   createResponsibility,
@@ -676,9 +684,14 @@ export const TOOLS: ToolDef[] = [
       properties: {
         title: { type: 'string', description: 'Short title for the sub-task.' },
         objective: { type: 'string', description: 'What the sub-agent must deliver. Be specific about the expected output.' },
+        objectives: {
+          type: 'array',
+          items: { type: 'string' },
+          description: 'Several self-contained objectives to run in parallel (at most 4). Use this when the pieces do not depend on each other.',
+        },
         project_id: { type: 'string' },
       },
-      required: ['objective'],
+      required: [],
     },
     risk: 'low',
     category: 'tasks',
@@ -690,31 +703,153 @@ export const TOOLS: ToolDef[] = [
           summary: 'Nested delegation refused.',
         };
       }
-      const objective = str(args, 'objective').trim();
-      if (!objective) return { ok: false, content: 'Give the sub-agent an objective.', summary: 'Sub-agent needs an objective.' };
-      const task = await createTask({
-        title: str(args, 'title').trim() || objective.slice(0, 80),
-        objective,
-        projectId: str(args, 'project_id') || null,
-        origin: 'subagent',
-      });
-      await executeTask(task.id);
-      const finished = await getTask(task.id);
-      if (!finished) return { ok: false, content: 'The sub-agent vanished.', summary: 'Sub-agent not found.' };
-      if (finished.status !== 'done') {
+      const many = Array.isArray(args.objectives)
+        ? (args.objectives as unknown[]).map((item) => String(item).trim()).filter(Boolean).slice(0, 4)
+        : [];
+      const single = str(args, 'objective').trim();
+      const objectives = many.length ? many : single ? [single] : [];
+      if (!objectives.length) {
+        return { ok: false, content: 'Give the sub-agent an objective, or several in objectives.', summary: 'Sub-agent needs an objective.' };
+      }
+
+      const runOne = async (objective: string, index: number) => {
+        const task = await createTask({
+          title: (index === 0 ? str(args, 'title').trim() : '') || objective.slice(0, 80),
+          objective,
+          projectId: str(args, 'project_id') || null,
+          origin: 'subagent',
+        });
+        await executeTask(task.id);
+        const finished = await getTask(task.id);
         return {
-          ok: false,
-          content: `Sub-agent did not finish (status: ${finished.status}). ${finished.error ?? ''}`.trim(),
-          summary: 'Sub-agent did not finish.',
-          display: { taskId: task.id },
+          taskId: task.id,
+          title: finished?.title ?? objective.slice(0, 80),
+          status: finished?.status ?? 'missing',
+          result: finished?.result ?? '',
+          error: finished?.error ?? '',
+        };
+      };
+
+      // Two at a time overlaps the work without tripping provider rate limits.
+      const outcomes: Awaited<ReturnType<typeof runOne>>[] = [];
+      for (let start = 0; start < objectives.length; start += 2) {
+        const batch = objectives.slice(start, start + 2).map((objective, offset) => runOne(objective, start + offset));
+        outcomes.push(...(await Promise.all(batch)));
+      }
+
+      const failed = outcomes.filter((outcome) => outcome.status !== 'done');
+      const report = outcomes
+        .map((outcome) => `### ${outcome.title}\nStatus: ${outcome.status}\n${outcome.result || outcome.error || 'No output.'}`)
+        .join('\n\n');
+      return {
+        ok: failed.length === 0,
+        content: `${outcomes.length === 1 ? 'Sub-agent finished' : `${outcomes.length} sub-agents ran`}.\n\n${report}`,
+        summary:
+          failed.length > 0
+            ? `${failed.length} of ${outcomes.length} sub-agent tasks did not finish.`
+            : `Completed ${outcomes.length} sub-agent ${outcomes.length === 1 ? 'task' : 'tasks'}.`,
+        display: { taskIds: outcomes.map((outcome) => outcome.taskId) },
+      };
+    },
+  },
+  {
+    name: 'watch',
+    description:
+      'Set up or manage a proactive watch: a page, RSS/Atom feed or search query checked on a cadence. When the content changes the owner is notified and, by default, you are handed a task to investigate what changed. This is how you notice things between conversations.',
+    parameters: {
+      type: 'object',
+      properties: {
+        action: { type: 'string', enum: ['create', 'list', 'update', 'delete', 'run'] },
+        watch_id: { type: 'string', description: 'Required for update, delete and run.' },
+        kind: { type: 'string', enum: ['url', 'rss', 'search'], description: 'url = a page, rss = a feed, search = a query whose top results are tracked.' },
+        target: { type: 'string', description: 'The URL, feed URL or search query.' },
+        label: { type: 'string', description: 'Short human name for the watch.' },
+        cadence_minutes: { type: 'number', description: 'How often to check. Default 360 (six hours).' },
+        notify: { type: 'boolean', description: 'Notify on change. Default true.' },
+        create_task: { type: 'boolean', description: 'Queue an investigation task on change. Default true.' },
+        status: { type: 'string', enum: ['active', 'paused'] },
+      },
+      required: ['action'],
+    },
+    risk: 'low',
+    category: 'tasks',
+    async run(args) {
+      const action = str(args, 'action');
+      if (action === 'list') {
+        const watches = await listWatches();
+        if (!watches.length) return { ok: true, content: 'No watches are set up yet.', summary: 'Listed watches: none.' };
+        return {
+          ok: true,
+          content: watches
+            .map(
+              (watch) =>
+                `- [${watch.status}] ${watch.label} (${watch.id}), ${watch.kind}: ${watch.target}, every ${watch.cadence_minutes} min. Last checked: ${watch.last_checked_at ? new Date(watch.last_checked_at).toISOString() : 'never'}. Last change: ${watch.last_change_at ? new Date(watch.last_change_at).toISOString() : 'none yet'}.`,
+            )
+            .join('\n'),
+          summary: `Listed ${watches.length} watches.`,
         };
       }
-      return {
-        ok: true,
-        content: `Sub-agent finished: ${finished.title}.\n\nOutcome:\n${finished.result ?? ''}`,
-        summary: `Delegated and completed "${finished.title}".`,
-        display: { taskId: task.id },
-      };
+
+      if (action === 'create') {
+        const kind = str(args, 'kind') as WatchKind;
+        if (kind !== 'url' && kind !== 'rss' && kind !== 'search') {
+          return { ok: false, content: 'Choose kind url, rss or search.', summary: 'Watch needs a kind.' };
+        }
+        const target = str(args, 'target').trim();
+        if (!target) return { ok: false, content: 'Give the watch a URL or query.', summary: 'Watch needs a target.' };
+        const watch = await createWatch({
+          kind,
+          target,
+          label: str(args, 'label'),
+          cadenceMinutes: num(args, 'cadence_minutes', 360),
+          notifyOnChange: args.notify !== false,
+          createTaskOnChange: args.create_task !== false,
+        });
+        return {
+          ok: true,
+          content: `Watching "${watch.label}" (${watch.kind}) every ${watch.cadence_minutes} minutes. The first check records a baseline; you hear about it only when it changes.`,
+          summary: `Watching "${watch.label}".`,
+          display: { watchId: watch.id },
+        };
+      }
+
+      const watchId = str(args, 'watch_id');
+      if (!watchId) return { ok: false, content: `Give the watch id for ${action}.`, summary: 'Watch id required.' };
+
+      if (action === 'delete') {
+        const removed = await deleteWatch(watchId);
+        return removed
+          ? { ok: true, content: `Dropped watch ${watchId}.`, summary: 'Watch dropped.' }
+          : { ok: false, content: 'No such watch.', summary: 'Watch not found.' };
+      }
+
+      if (action === 'update') {
+        const updated = await updateWatch(watchId, {
+          status: str(args, 'status') === 'paused' ? 'paused' : str(args, 'status') === 'active' ? 'active' : undefined,
+          label: str(args, 'label') || undefined,
+          target: str(args, 'target') || undefined,
+          cadenceMinutes: args.cadence_minutes === undefined ? undefined : num(args, 'cadence_minutes', 360),
+          notifyOnChange: args.notify === undefined ? undefined : args.notify !== false,
+          createTaskOnChange: args.create_task === undefined ? undefined : args.create_task !== false,
+        });
+        return updated
+          ? { ok: true, content: `Updated watch "${updated.label}" (${updated.status}, every ${updated.cadence_minutes} min).`, summary: 'Watch updated.' }
+          : { ok: false, content: 'No such watch.', summary: 'Watch not found.' };
+      }
+
+      if (action === 'run') {
+        const result = await checkWatch(watchId);
+        if (!result) return { ok: false, content: 'No such watch.', summary: 'Watch not found.' };
+        const verdict = result.baseline ? 'Baseline captured' : result.changed ? 'Changed since the last check' : 'Unchanged';
+        return {
+          ok: true,
+          content: `${verdict} for "${result.watch.label}".\n\n${result.summary}`,
+          summary: `${verdict}: "${result.watch.label}".`,
+          display: { watchId, changed: result.changed },
+        };
+      }
+
+      return { ok: false, content: 'Unknown action. Use create, list, update, delete or run.', summary: 'Unknown watch action.' };
     },
   },
   {
