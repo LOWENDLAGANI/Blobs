@@ -46,7 +46,6 @@ export function ConsolePage({ overview }: { overview: OverviewShape | null }) {
   const [title, setTitle] = useState('New conversation');
   const [historyOpen, setHistoryOpen] = useState(false);
   const [conversations, setConversations] = useState<Conversation[]>([]);
-  const [approval, setApproval] = useState<{ id: string; title: string } | null>(null);
 
   const engineRef = useRef<VoiceEngine | null>(null);
   const abortRef = useRef<AbortController | null>(null);
@@ -142,7 +141,6 @@ export function ConsolePage({ overview }: { overview: OverviewShape | null }) {
       if (!text || streamingRef.current) return;
       const engine = engineRef.current;
       setError('');
-      setApproval(null);
       setInterim('');
       setDraft('');
       const local: Message = {
@@ -189,10 +187,6 @@ export function ConsolePage({ overview }: { overview: OverviewShape | null }) {
                 break;
               case 'tool_end':
                 setTool(null);
-                break;
-              case 'approval':
-                setApproval({ id: event.approval.id, title: event.approval.title });
-                if (voice) engine?.speak("I need your approval before I do that. It is waiting in your activity feed.");
                 break;
               case 'error':
                 setError(event.message);
@@ -303,7 +297,6 @@ export function ConsolePage({ overview }: { overview: OverviewShape | null }) {
     setMessages([]);
     setTitle('New conversation');
     setError('');
-    setApproval(null);
     setHistoryOpen(false);
   };
 
@@ -449,17 +442,6 @@ export function ConsolePage({ overview }: { overview: OverviewShape | null }) {
 
             {interim && <p className="live-line">“{interim}”</p>}
 
-            {approval && (
-              <div className="note warn">
-                <strong>Approval needed:</strong> {approval.title}
-                <div style={{ marginTop: 8 }}>
-                  <Button size="sm" variant="outline" onClick={() => (window.location.hash = '#/activity')}>
-                    Review in Activity
-                  </Button>
-                </div>
-              </div>
-            )}
-
             {error && <div className="msg-error">{error}</div>}
           </div>
         </div>
@@ -501,7 +483,11 @@ export function ConsolePage({ overview }: { overview: OverviewShape | null }) {
                 </>
               )}
             </span>
-            <span>{overview?.autonomy.state === 'active' ? 'Autonomy active' : `Autonomy ${overview?.autonomy.state ?? ''}`}</span>
+            <span>
+              {overview?.autonomy.state === 'active'
+                ? 'Autonomous · acting on its own'
+                : `Autonomy ${overview?.autonomy.state ?? ''}`}
+            </span>
           </div>
         </div>
       </div>

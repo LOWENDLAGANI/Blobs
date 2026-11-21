@@ -3,7 +3,7 @@
  *
  * Boots a stub OpenAI-compatible model server, starts the real BLOBS server
  * against a throwaway data directory, and exercises the actual HTTP API:
- * auth, streaming chat with a tool call, memory retrieval, approval gating,
+ * auth, streaming chat with a tool call, memory retrieval, autonomous tools,
  * the emergency stop and background task execution.
  *
  * Run with: npm run smoke
@@ -270,23 +270,24 @@ async function main(): Promise<void> {
   const second = await chat('What do you remember about my style?');
   check('second turn streams', second.events.some((event) => event.type === 'done'));
 
-  console.log('\nApproval gating');
-  await chat('Send an email to someone@example.com about the report.');
-  const pending = await call<{ items: { id: string; title: string; status: string }[] }>('GET', '/api/approvals');
-  check('external email requires approval', pending.data.items.length >= 1, JSON.stringify(pending.data.items));
-  const approvalId = pending.data.items[0]?.id;
-  if (approvalId) {
-    const decided = await call('POST', `/api/approvals/${approvalId}/decide`, { decision: 'rejected' });
-    check('approval can be rejected', decided.status === 200);
-  }
-  const afterReject = await call<{ items: { status: string }[] }>('GET', '/api/approvals');
-  check('no approvals left pending', afterReject.data.items.length === 0);
+  console.log('\nAutonomous actions');
+  const action = await chat('Send an email to someone@example.com about the report.');
+  check(
+    'external email runs without an approval gate',
+    action.events.some((event) => event.type === 'tool_start' && event.name === 'send_email'),
+    action.raw.slice(0, 240),
+  );
+  const pending = await call<{ items: unknown[] }>('GET', '/api/approvals');
+  check('nothing is queued for manual approval', pending.data.items.length === 0, JSON.stringify(pending.data.items));
 
   console.log('\nEmergency stop');
   await call('POST', '/api/settings/autonomy', { state: 'stopped' });
-  await chat('Send an email to someone@example.com right now.');
-  const blocked = await call<{ items: unknown[] }>('GET', '/api/approvals');
-  check('emergency stop blocks side-effecting tools', blocked.data.items.length === 0);
+  const blocked = await chat('Send an email to someone@example.com right now.');
+  check(
+    'emergency stop blocks side-effecting tools',
+    !blocked.events.some((event) => event.type === 'tool_start' && event.name === 'send_email'),
+    blocked.raw.slice(0, 240),
+  );
   await call('POST', '/api/settings/autonomy', { state: 'active' });
 
   console.log('\nBackground task execution');

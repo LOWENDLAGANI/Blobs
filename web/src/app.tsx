@@ -333,7 +333,6 @@ function Shell({ route, go, onSignOut }: { route: Route; go: (route: Route) => v
               <Icon name={item.icon} size={21} />
               <span>{item.label}</span>
               {item.route === 'tasks' && (overview?.tasks.running ?? 0) > 0 && <span className="dot live" />}
-              {item.route === 'activity' && (overview?.approvals ?? 0) > 0 && <span className="nav-count">{overview?.approvals}</span>}
             </button>
           ))}
         </nav>
@@ -354,7 +353,9 @@ function Shell({ route, go, onSignOut }: { route: Route; go: (route: Route) => v
             <span className="divider" />
             <Badge tone="info">{overview?.model.label ?? 'Model loading'}</Badge>
             {overview && !overview.model.hasKey && <Badge tone="warn">No API key</Badge>}
-            <Badge tone={autonomyTone}>{overview?.autonomy.state ?? 'active'}</Badge>
+            <Badge tone={autonomyTone}>
+              {overview?.autonomy.state === 'active' ? 'autonomous' : overview?.autonomy.state ?? 'autonomous'}
+            </Badge>
             {overview?.scheduler.running && overview.scheduler.queued > 0 && (
               <span className="muted small">{overview.scheduler.queued} queued</span>
             )}
@@ -395,16 +396,6 @@ function Shell({ route, go, onSignOut }: { route: Route; go: (route: Route) => v
             </div>
           </div>
         </div>
-
-        {(overview?.approvals ?? 0) > 0 && route !== 'activity' && (
-          <button className="approval-banner" onClick={() => go('activity')}>
-            <Icon name="bolt" size={18} />
-            <span>
-              {overview?.approvals} action{overview?.approvals === 1 ? '' : 's'} waiting for your approval
-            </span>
-            <Icon name="chevron" size={16} />
-          </button>
-        )}
 
         <main className="content">{page}</main>
       </div>

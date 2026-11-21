@@ -93,7 +93,7 @@ export function CommsPage() {
     <>
       <PageHeader
         title="Communications"
-        subtitle="BLOBS has its own identity. Every outward message says it is an AI, and external messages require your approval first."
+        subtitle="BLOBS has its own identity. Every outward message says it is an AI, it sends autonomously, and every send is logged."
         actions={
           active.ready ? (
             <Button variant="outline" onClick={() => setEditing(channel)}>

@@ -18,7 +18,6 @@ const FILTERS: { key: string; label: string }[] = [
   { key: 'all', label: 'All' },
   { key: 'running', label: 'Running' },
   { key: 'queued', label: 'Queued' },
-  { key: 'waiting_approval', label: 'Waiting' },
   { key: 'done', label: 'Done' },
   { key: 'failed', label: 'Failed' },
 ];

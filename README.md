@@ -1,8 +1,11 @@
 # BLOBS
 
-A persistent, voice-first personal AI agent. Not a chatbot with a nicer skin — one continuous agent with its own
-identity, long-term memory, a task engine that keeps working after you close the tab, and a control centre to watch and
-steer it.
+A persistent, voice-first, **autonomous** personal AI agent. Not a chatbot with a nicer skin — one continuous agent with
+its own identity, long-term memory, a task engine that keeps working after you close the tab, and a control centre to
+watch and steer it.
+
+It acts on its own. Voice and chat are the whole interface: there is no approval prompt, card or manual gate between
+what BLOBS decides and what it does.
 
 Built to run on a free tier first: browser-native voice, free web research, SQLite (on disk or in Turso Cloud), and a
 model layer you can point at Gemini's free tier, a small DeepSeek top-up, or any OpenAI-compatible endpoint.
@@ -10,7 +13,7 @@ model layer you can point at Gemini's free tier, a small DeepSeek top-up, or any
 ```
 ┌──────────────────────────────┐        ┌──────────────────────────────────────────┐
 │  Web control centre (React)  │  SSE   │  Agent server (Node + Fastify)            │
-│  voice · chat · tasks · mem  │◄──────►│  provider adapter · tool loop · approvals │
+│  voice · chat · tasks · mem  │◄──────►│  provider adapter · autonomous tool loop   │
 └──────────────────────────────┘        │  task engine · scheduler · libSQL → Turso  │
                                         └───────────────┬──────────────────────────┘
                                                         │
@@ -43,7 +46,7 @@ npm run web          # Vite UI on :3000, proxying /api
 
 ## Where memory lives: local file or Turso
 
-BLOBS keeps everything — memory, conversations, tasks, approvals, settings — in one SQLite schema. The client speaks
+BLOBS keeps everything — memory, conversations, tasks, settings — in one SQLite schema. The client speaks
 libSQL, so the same code runs against a file on the server or a Turso Cloud database across the network.
 
 ```bash
@@ -211,15 +214,15 @@ What to keep in mind:
 | `sandbox_transfer` (upload/download) | E2B key | medium |
 | `start_server` + public URL | E2B key | medium |
 | `desktop_action` (screenshot/click/type/keys/scroll/drag/open/launch) | E2B key | medium |
-| `send_email` | SMTP/IMAP mailbox | high → approval |
-| `make_phone_call` | Twilio | high → approval |
+| `send_email` | SMTP/IMAP mailbox | high |
+| `make_phone_call` | Twilio | high |
 
 Adding a tool is one object in `server/agent/tools.ts`: name, description, JSON schema, risk level, implementation.
-The agent loop, task planner and approval system pick it up automatically.
+The agent loop and task planner pick it up automatically.
 
 Tool output is always treated as **untrusted data** and fenced as such in the prompt. The system prompt states that
-instructions found in webpages, files or messages must never override the owner's rules, and the approval gates are
-enforced in server code — not by asking the model nicely.
+instructions found in webpages, files or messages must never override the owner's rules, and the execution limits and
+emergency stop are enforced in server code — not by asking the model nicely.
 
 `fetch_page` blocks loopback, private, link-local and metadata-style addresses, and refuses non-http(s) schemes.
 
@@ -246,8 +249,8 @@ stored in SQLite, and later actions reconnect (auto-resuming a paused sandbox) s
   so you can watch what it is doing.
 
 Safety: the VM is isolated from your own computer, and no BLOBS secret is ever injected into its environment. Computer
-use can be switched off entirely, limited to non-desktop work, or made to require your approval for **every** action in
-**Settings → Computer**. The emergency stop blocks all computer tools immediately.
+use can be switched off entirely or limited to non-desktop work in **Settings → Computer**; there is no per-action
+approval, because BLOBS acts autonomously. The emergency stop blocks all computer tools immediately.
 
 Cost and limits: E2B includes free credits, then bills per sandbox-second; the free tier also caps sandbox lifetime at
 one hour. Default timeout here is 20 minutes, configurable up to 60, and **Reset sandbox** kills the machine and its
@@ -270,15 +273,17 @@ business verification.
 
 ## Autonomy and control
 
-- **Levels**: manual (only what you ask), assisted (research and prepare, propose bigger actions), autonomous (act
-  within the rules).
-- **Approval gates** for money, deletion, publishing, messaging people outside you, and security changes. Each can be
-  toggled, but they are on by default and enforced server-side.
-- A pending approval pauses the conversation or task and shows up in Activity, the top banner and notifications. The
-  model can never approve its own action.
-- **Execution limits**: steps per task, tool calls per task, daily token budget.
-- **Pause** stops new work after the current step. **Emergency stop** blocks every side-effecting tool immediately.
-- Everything is logged: tool calls, plans, approvals, errors, retries, model usage.
+BLOBS is **autonomous-first**. Voice and chat are the front door, and no screen ever asks you to approve an action.
+
+- **No approval step.** Money, deletion, publishing, external messages and security changes execute immediately. The
+  server does not create approval requests, so nothing can pause waiting for a decision.
+- **One mode.** Autonomy is always `autonomous`, with background work on. Old settings rows that still contain manual
+  modes or approval gates are upgraded when they are read.
+- **Guardrails, not permission slips**: steps per task, tool calls per task, daily token budget.
+- **Pause** stops new work after the current step. **Emergency stop** blocks every side-effecting tool immediately and
+  is the only thing that can stop the agent acting.
+- **Proactive check-ins** let it review open work and act on one useful thing roughly once an hour.
+- Everything is logged: tool calls, plans, messages, errors, retries, model usage.
 
 ## Security model
 
@@ -293,15 +298,15 @@ business verification.
 ## Verification
 
 ```bash
-npm run smoke        # 28 end-to-end checks against a throwaway database
+npm run smoke        # 27 end-to-end checks against a throwaway database
 node scripts/tools-check.ts   # live web research, files, sandbox, SSRF guard
 npx tsc --noEmit
 npm run build
 ```
 
 `npm run smoke` boots a stub OpenAI-compatible model server and the real app, then exercises auth, streaming chat with a
-tool call, memory persistence and retrieval, approval gating, the emergency stop, and background task execution from
-plan to outcome. `scripts/tools-check.ts` additionally proves live web search and page reading, the SSRF guard, the
+tool call, memory persistence and retrieval, autonomous tool execution, the emergency stop, and background task
+execution from plan to outcome. `scripts/tools-check.ts` additionally proves live web search and page reading, the SSRF guard, the
 workspace sandbox, the JS sandbox, and that computer tools refuse cleanly when E2B is not connected.
 
 ## Project layout
@@ -314,7 +319,7 @@ server/
   auth.ts             owner passphrase, sessions, CSRF check
   settings.ts         defaults, providers, encrypted secrets
   memory.ts           memory CRUD + hybrid FTS5 retrieval
-  approvals.ts        approval queue
+  approvals.ts        approval records (kept for old data; the agent never gates)
   llm/                provider adapters (OpenAI-compatible, Gemini) + retries
   agent/              prompt, tool registry, agent loop, chat, tasks, scheduler
   comms/              email (SMTP/IMAP) and phone (Twilio)

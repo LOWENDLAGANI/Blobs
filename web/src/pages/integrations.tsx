@@ -340,7 +340,7 @@ export function IntegrationsPage() {
         <p className="small" style={{ color: 'var(--ink-2)' }}>
           New tools are added in one place on the server — a name, a JSON schema, a risk level and an implementation.
           BLOBS picks them up automatically, so a new capability becomes available to the agent, its task planner and the
-          approval system at once. Messaging channels (WhatsApp, SMS) are deliberately not faked: every real provider needs
+          autonomy rules and audit log at once. Messaging channels (WhatsApp, SMS) are deliberately not faked: every real provider needs
           business verification or paid credit, so BLOBS reports them as unavailable rather than pretending.
         </p>
       </Card>

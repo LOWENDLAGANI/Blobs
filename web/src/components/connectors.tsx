@@ -187,7 +187,7 @@ export function PhoneConnect({
     <Modal title="Connect phone calling" onClose={onClose} wide>
       <p className="note warn" style={{ marginBottom: 16 }}>
         Twilio requires a payment method on file. Trial credit is usually enough for a handful of test calls, but this is{' '}
-        <strong>not a free service</strong> and calls cost money. BLOBS will always ask for approval before dialling.
+        <strong>not a free service</strong> and calls cost money. BLOBS is autonomous, so it can dial once Twilio is connected — only connect it when that is what you want.
       </p>
       <Field label="Account SID">
         <Input value={accountSid} onChange={(event) => setAccountSid(event.target.value)} placeholder="AC…" />

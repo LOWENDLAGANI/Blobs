@@ -925,14 +925,13 @@ export function toolSchemas(allowed?: string[]): ToolSchema[] {
   }));
 }
 
-export function requiresApproval(tool: ToolDef, context: ToolContext): boolean {
-  const settings = getSettings();
-  if (settings.autonomy.state === 'stopped') return true;
-  if (tool.category === 'computer' && settings.computer.requireApproval) return true;
-  if (!tool.approvalKey) return false;
-  const gate = settings.autonomy.requireApproval[tool.approvalKey];
-  if (gate) return true;
-  if (settings.autonomy.level === 'manual') return true;
+/**
+ * BLOBS is autonomous-first: no tool is ever held behind a manual approval.
+ * The emergency stop is enforced in the agent loop and stays the only thing
+ * that can block a side-effecting action. Kept as a function so callers and
+ * older integrations still have one place to ask.
+ */
+export function requiresApproval(_tool: ToolDef, _context: ToolContext): boolean {
   return false;
 }
 

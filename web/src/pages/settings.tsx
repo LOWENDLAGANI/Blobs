@@ -461,32 +461,19 @@ export function SettingsPage({ refreshShell }: { refreshShell: () => Promise<voi
       </Card>
 
       {/* ----------------------------- autonomy ---------------------------- */}
-      <p className="section-title">Autonomy and safety</p>
+      <p className="section-title">Autonomous</p>
       <Card className="stack">
         <div className="row" style={{ gap: 8 }}>
           <Badge tone={draft.autonomy.state === 'stopped' ? 'bad' : draft.autonomy.state === 'paused' ? 'warn' : 'good'}>
-            {draft.autonomy.state}
+            {draft.autonomy.state === 'active' ? 'autonomous' : draft.autonomy.state}
           </Badge>
-          <span className="muted tiny">Background work: {draft.autonomy.backgroundEnabled ? 'enabled' : 'disabled'}</span>
+          <span className="muted tiny">No approvals · background work always on</span>
         </div>
 
-        <Field label="Freedom" hint="How much BLOBS does without being asked.">
-          <Select
-            value={draft.autonomy.level}
-            onChange={(event) => setDraft({ ...draft, autonomy: { ...draft.autonomy, level: event.target.value as AppSettings['autonomy']['level'] } })}
-          >
-            <option value="manual">Manual — only what I ask, in this conversation</option>
-            <option value="assisted">Assisted — research and prepare, propose bigger actions</option>
-            <option value="autonomous">Autonomous — act within the approval rules</option>
-          </Select>
-        </Field>
-
-        <Toggle
-          checked={draft.autonomy.backgroundEnabled}
-          onChange={(value) => setDraft({ ...draft, autonomy: { ...draft.autonomy, backgroundEnabled: value } })}
-          label="Work in the background"
-          hint="Tasks continue on the server after you close this site. They resume from checkpoints after a restart."
-        />
+        <p className="small" style={{ color: 'var(--ink-2)' }}>
+          BLOBS acts without asking. Money, deletion, publishing, external messages and security changes run immediately,
+          so the limits below and the stop buttons are the real guardrails.
+        </p>
         <Toggle
           checked={draft.autonomy.proactiveCheckIns}
           onChange={(value) => setDraft({ ...draft, autonomy: { ...draft.autonomy, proactiveCheckIns: value } })}
@@ -518,32 +505,9 @@ export function SettingsPage({ refreshShell }: { refreshShell: () => Promise<voi
           />
         </Field>
 
-        <p className="field-label">Always ask before</p>
-        {(
-          [
-            ['financial', 'Spending money or using paid services'],
-            ['deletion', 'Deleting data'],
-            ['publishing', 'Publishing anything publicly'],
-            ['externalMessages', 'Messaging someone other than me'],
-            ['security', 'Changing security or account settings'],
-          ] as const
-        ).map(([key, label]) => (
-          <Toggle
-            key={key}
-            checked={draft.autonomy.requireApproval[key]}
-            onChange={(value) =>
-              setDraft({
-                ...draft,
-                autonomy: { ...draft.autonomy, requireApproval: { ...draft.autonomy.requireApproval, [key]: value } },
-              })
-            }
-            label={label}
-          />
-        ))}
-
         <div className="row">
-          <Button busy={busy === 'save'} onClick={() => void save({ autonomy: draft.autonomy }, 'Autonomy saved.')}>
-            Save autonomy
+          <Button busy={busy === 'save'} onClick={() => void save({ autonomy: draft.autonomy }, 'Limits saved.')}>
+            Save limits
           </Button>
         </div>
 
@@ -602,11 +566,6 @@ export function SettingsPage({ refreshShell }: { refreshShell: () => Promise<voi
           checked={draft.notifications.notifyOnTaskComplete}
           onChange={(value) => setDraft({ ...draft, notifications: { ...draft.notifications, notifyOnTaskComplete: value } })}
           label="When a task finishes"
-        />
-        <Toggle
-          checked={draft.notifications.notifyOnApproval}
-          onChange={(value) => setDraft({ ...draft, notifications: { ...draft.notifications, notifyOnApproval: value } })}
-          label="When approval is needed"
         />
         <Toggle
           checked={draft.notifications.notifyOnError}
@@ -688,12 +647,6 @@ export function SettingsPage({ refreshShell }: { refreshShell: () => Promise<voi
           onChange={(value) => setDraft({ ...draft, computer: { ...draft.computer, desktop: value } })}
           label="Graphical desktop"
           hint="Screenshot, mouse and keyboard control of a full Linux desktop with a browser."
-        />
-        <Toggle
-          checked={draft.computer.requireApproval}
-          onChange={(value) => setDraft({ ...draft, computer: { ...draft.computer, requireApproval: value } })}
-          label="Ask before every computer action"
-          hint="Each shell command, file write or desktop action waits for your approval. Slower, but fully supervised."
         />
         <Field label="Sandbox timeout (minutes)" hint="How long the machine stays alive after its last use. E2B caps this at 60 minutes on the free tier.">
           <Input

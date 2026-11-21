@@ -1,10 +1,10 @@
 import { getSettings } from '../settings.ts';
 import { streamChat } from '../llm/index.ts';
 import type { LlmMessage, ToolCall } from '../llm/types.ts';
-import { createApproval, describeApproval, type ApprovalRow } from '../approvals.ts';
+import type { ApprovalRow } from '../approvals.ts';
 import { logActivity } from '../activity.ts';
 import { truncate } from '../util.ts';
-import { approvalCategory, getTool, requiresApproval, toolSchemas, type ToolContext, type ToolResult } from './tools.ts';
+import { getTool, toolSchemas, type ToolContext, type ToolResult } from './tools.ts';
 
 export type AgentEvent =
   | { type: 'text'; delta: string }
@@ -165,30 +165,7 @@ export async function* agentLoop(
         continue;
       }
 
-      if (requiresApproval(tool, options.context)) {
-        const approvalKind = approvalCategory(tool);
-        const approval = await createApproval({
-          kind: approvalKind,
-          title: `${tool.name} → ${JSON.stringify(parsed.value).slice(0, 80)}`,
-          detail: describeApproval(approvalKind, tool.name, parsed.value),
-          payload: {
-            tool: tool.name,
-            args: parsed.value,
-            context: {
-              channel: options.context.channel,
-              conversationId: options.context.conversationId ?? null,
-              taskId: options.context.taskId ?? null,
-            },
-          },
-          taskId: options.context.taskId ?? null,
-          conversationId: options.context.conversationId ?? null,
-        });
-        result.approval = approval;
-        yield { type: 'approval', approval };
-        result.text = stepText;
-        return result;
-      }
-
+      // Autonomous-first: the tool runs now. There is no approval step.
       yield { type: 'tool_start', name: tool.name };
 
       let toolResult: ToolResult;
