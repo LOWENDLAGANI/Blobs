@@ -282,6 +282,7 @@ What to keep in mind:
 | `sandbox_transfer` (upload/download) | E2B key | medium |
 | `start_server` + public URL | E2B key | medium |
 | `desktop_action` (screenshot/click/type/keys/scroll/drag/open/launch) | E2B key | medium |
+| `browser` (open/snapshot/click/type/press/back/extract/screenshot/close) | E2B key | medium |
 | `send_email` | SMTP/IMAP mailbox | high |
 | `make_phone_call` | Twilio | high |
 
@@ -315,6 +316,15 @@ stored in Postgres, and later actions reconnect (auto-resuming a paused sandbox)
 - **Desktop:** `desktop_action` drives a real X11 desktop with a browser — screenshots, clicks, typing, key chords,
   scrolling, dragging, opening URLs and launching apps. The latest screenshot is shown in **Integrations → Computer**,
   so you can watch what it is doing.
+- **Browsing:** `browser` drives a real Chromium page on the same machine. It opens a URL and reports the
+  interactive elements it finds with **numbers** — links, buttons, inputs — so `click` and `type` name an element
+  instead of guessing at CSS. `extract` pulls out text, links or HTML, `screenshot` saves a PNG into the BLOBS
+  workspace, and one page stays open between calls, so signing in and then filling a form is a single session.
+
+The first browser call installs Playwright and Chromium inside the sandbox, which takes a few minutes; the tool says
+so and the next call works. Screenshots land in the workspace under `screenshots/`. To drive your own browser container
+instead of E2B, set `BROWSER_BASE_URL` (plus `BROWSER_TOKEN` if that daemon checks one) and run
+`server/computer/browser-daemon.mjs` there.
 
 Safety: the VM is isolated from your own computer, and no BLOBS secret is ever injected into its environment. Computer
 use can be switched off entirely or limited to non-desktop work in **Settings → Computer**; there is no per-action
