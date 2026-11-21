@@ -27,6 +27,9 @@ export function MemoryPage() {
   const [query, setQuery] = useState('');
   const [kind, setKind] = useState('all');
   const [editing, setEditing] = useState<MemoryItem | 'new' | null>(null);
+  const [importing, setImporting] = useState(false);
+  const [importText, setImportText] = useState('');
+  const [importBusy, setImportBusy] = useState(false);
 
   const load = useCallback(async () => {
     try {
@@ -61,17 +64,65 @@ export function MemoryPage() {
     await load();
   };
 
+  const importMemories = async (): Promise<void> => {
+    if (importText.trim().length < 8) return toast('Paste a little more first.', 'bad');
+    setImportBusy(true);
+    try {
+      const result = await post<{ imported: number; skipped: number }>('/api/memory/import', { text: importText });
+      toast(
+        `Imported ${result.imported} ${result.imported === 1 ? 'memory' : 'memories'}${result.skipped ? `, skipped ${result.skipped} duplicates` : ''}.`,
+        'good',
+      );
+      setImportText('');
+      setImporting(false);
+      await load();
+    } catch (error) {
+      toast((error as Error).message, 'bad');
+    } finally {
+      setImportBusy(false);
+    }
+  };
+
   return (
     <>
       <PageHeader
         title="Memory"
         subtitle="What BLOBS carries between sessions and across model changes. Retrieval is relevance-based, so old detail does not crowd out what matters now."
         actions={
-          <Button onClick={() => setEditing('new')}>
-            <Icon name="plus" size={16} /> Add memory
-          </Button>
+          <div className="row" style={{ gap: 8 }}>
+            <Button variant="outline" onClick={() => setImporting((open) => !open)}>
+              <Icon name="plug" size={16} /> Import
+            </Button>
+            <Button onClick={() => setEditing('new')}>
+              <Icon name="plus" size={16} /> Add memory
+            </Button>
+          </div>
         }
       />
+
+      {importing && (
+        <Card className="stack">
+          <Field
+            label="Paste anything worth keeping"
+            hint="One fact, preference or decision per line. Bullets and blank lines are fine; duplicates are skipped."
+          >
+            <TextArea
+              value={importText}
+              onChange={(event) => setImportText(event.target.value)}
+              rows={8}
+              placeholder={'I prefer concise answers without preamble.\nThe Q4 launch is the priority until December.\nMy timezone is Asia/Kuala_Lumpur.'}
+            />
+          </Field>
+          <div className="row" style={{ gap: 8 }}>
+            <Button busy={importBusy} onClick={() => void importMemories()}>
+              Import memories
+            </Button>
+            <Button variant="quiet" onClick={() => setImporting(false)}>
+              Cancel
+            </Button>
+          </div>
+        </Card>
+      )}
 
       <div className="row" style={{ marginBottom: 16, gap: 10 }}>
         <div style={{ flex: 1, minWidth: 220, position: 'relative' }}>

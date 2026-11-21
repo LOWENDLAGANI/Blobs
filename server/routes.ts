@@ -614,6 +614,38 @@ export async function registerRoutes(app: FastifyInstance): Promise<void> {
     return { ok: true, approval };
   });
 
+  app.post('/api/memory/import', async (request, reply) => {
+    const body = (request.body ?? {}) as { text?: string; kind?: string };
+    const text = String(body.text ?? '').trim();
+    if (text.length < 8) return bad(reply, 'Paste at least a sentence to import.');
+    const kinds = ['fact', 'preference', 'project', 'decision', 'lesson', 'person', 'summary', 'note'] as const;
+    const requested = String(body.kind ?? 'fact');
+    const kind = (kinds as readonly string[]).includes(requested) ? (requested as (typeof kinds)[number]) : 'fact';
+    const chunks = text
+      .split(/\n\s*\n|^\s*[-*•]\s+/gm)
+      .flatMap((chunk) => (chunk.length > 600 ? chunk.split(/(?<=[.!?])\s+/).filter(Boolean) : [chunk]))
+      .map((chunk) => chunk.replace(/^\s*[-*•]\s+/, '').replace(/\s+/g, ' ').trim())
+      .filter((chunk) => chunk.length >= 8)
+      .slice(0, 100);
+    const seen = new Set<string>();
+    let imported = 0;
+    let skipped = 0;
+    for (const content of chunks) {
+      const key = content.toLowerCase();
+      if (seen.has(key)) {
+        skipped += 1;
+        continue;
+      }
+      seen.add(key);
+      await remember({ content, kind, source: 'import', tags: ['imported'], importance: 3 });
+      imported += 1;
+    }
+    if (imported > 0) {
+      logActivity({ level: 'success', category: 'memory', message: `Imported ${imported} memories from another assistant.` });
+    }
+    return { ok: true, imported, skipped };
+  });
+
   /* ---------------- watches & research ---------------- */
 
   app.get('/api/watches', async () => ({ items: await listWatches() }));
