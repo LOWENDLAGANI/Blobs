@@ -196,6 +196,24 @@ CREATE TABLE IF NOT EXISTS deliverables (
 CREATE INDEX IF NOT EXISTS idx_deliverables_created ON deliverables(created_at DESC);
 CREATE UNIQUE INDEX IF NOT EXISTS idx_deliverables_token ON deliverables(public_token);
 
+CREATE TABLE IF NOT EXISTS oauth_connections (
+  provider TEXT PRIMARY KEY,
+  account TEXT,
+  scopes TEXT NOT NULL DEFAULT '',
+  access_expires_at INTEGER,
+  connected_at INTEGER NOT NULL
+);
+CREATE TABLE IF NOT EXISTS oauth_states (
+  state TEXT PRIMARY KEY,
+  provider TEXT NOT NULL,
+  client_id TEXT NOT NULL,
+  redirect_uri TEXT NOT NULL,
+  code_verifier TEXT NOT NULL,
+  scopes TEXT NOT NULL DEFAULT '',
+  created_at INTEGER NOT NULL,
+  expires_at INTEGER NOT NULL
+);
+
 CREATE TABLE IF NOT EXISTS approvals (
   id TEXT PRIMARY KEY,
   kind TEXT NOT NULL,

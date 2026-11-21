@@ -75,6 +75,7 @@ import {
   updateResponsibility,
 } from './agent/responsibilities.ts';
 import { dispatchChannels } from './channels.ts';
+import { completeOAuth, deleteConnection, listConnections, oauthRequest, startOAuth } from './oauth.ts';
 import {
   createDeliverable,
   deleteDeliverable,
@@ -641,6 +642,61 @@ export async function registerRoutes(app: FastifyInstance): Promise<void> {
     return reply.send(
       packetPage(deliverable.title, `<pre style="white-space:pre-wrap;font:15px/1.65 ui-monospace,monospace">${escapeHtml(deliverable.body)}</pre>`),
     );
+  });
+
+  /* ---------------- oauth connections ---------------- */
+
+  app.get('/api/oauth/connections', async () => ({ items: await listConnections() }));
+
+  app.post('/api/oauth/start', async (request, reply) => {
+    const body = (request.body ?? {}) as {
+      provider?: string;
+      clientId?: string;
+      clientSecret?: string;
+      scopes?: string;
+    };
+    if (!body.provider || !body.clientId?.trim()) return bad(reply, 'Provider and client id are required.');
+    const proto = String(request.headers['x-forwarded-proto'] ?? request.protocol ?? 'http')
+      .split(',')[0]
+      .trim();
+    const host = String(request.headers['x-forwarded-host'] ?? request.headers.host ?? '').trim();
+    if (!host) return bad(reply, 'Could not determine the public origin.');
+    const redirectUri = `${proto}://${host}/oauth/callback`;
+    try {
+      const started = await startOAuth({
+        provider: body.provider,
+        clientId: body.clientId,
+        clientSecret: body.clientSecret,
+        scopes: body.scopes,
+        redirectUri,
+      });
+      return { ok: true, url: started.url, state: started.state, redirectUri };
+    } catch (error) {
+      return bad(reply, (error as Error).message);
+    }
+  });
+
+  app.delete('/api/oauth/connections/:provider', async (request) => {
+    const { provider } = request.params as { provider: string };
+    return { ok: await deleteConnection(provider) };
+  });
+
+  app.get('/oauth/callback', async (request, reply) => {
+    const query = request.query as { code?: string; state?: string; error?: string; error_description?: string };
+    if (query.error) {
+      const message = encodeURIComponent(query.error_description || query.error);
+      return reply.redirect(`/integrations?oauth=error&message=${message}`);
+    }
+    if (!query.code || !query.state) {
+      return reply.redirect('/integrations?oauth=error&message=missing_code_or_state');
+    }
+    try {
+      const connection = await completeOAuth({ code: query.code, state: query.state });
+      return reply.redirect(`/integrations?oauth=connected&provider=${encodeURIComponent(connection.provider)}`);
+    } catch (error) {
+      const message = encodeURIComponent((error as Error).message);
+      return reply.redirect(`/integrations?oauth=error&message=${message}`);
+    }
   });
 
   /* ---------------- responsibilities ---------------- */

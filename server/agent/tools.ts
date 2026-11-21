@@ -16,6 +16,7 @@ import {
   updateResponsibility,
 } from './responsibilities.ts';
 import { createDeliverable, publishDeliverable } from '../deliverables.ts';
+import { oauthRequest } from '../oauth.ts';
 import { createProject, updateProject } from './projects.ts';
 import { sendEmail, emailStatus } from '../comms/email.ts';
 import { placeCall, phoneStatus } from '../comms/phone.ts';
@@ -710,6 +711,45 @@ export const TOOLS: ToolDef[] = [
         };
       }
       return { ok: false, content: 'Unknown action. Use create, update, list or run.', summary: 'Unknown responsibility action.' };
+    },
+  },
+  {
+    name: 'oauth_request',
+    description:
+      'Call an authenticated HTTP API using a connected OAuth account (GitHub, Google, ...). Use after the owner connects the account in Integrations.',
+    parameters: {
+      type: 'object',
+      properties: {
+        provider: { type: 'string', description: 'Connected provider id, e.g. github or google.' },
+        method: { type: 'string', description: 'HTTP method. Default GET.' },
+        url: { type: 'string', description: 'Full https URL of the API endpoint.' },
+        headers: { type: 'object', description: 'Extra headers as an object.' },
+        body: { type: 'string', description: 'Request body as a string.' },
+      },
+      required: ['provider', 'url'],
+    },
+    risk: 'low',
+    category: 'computer',
+    async run(args) {
+      const provider = str(args, 'provider');
+      const url = str(args, 'url').trim();
+      if (!provider || !url) return { ok: false, content: 'provider and url are required.', summary: 'Missing OAuth request fields.' };
+      try {
+        const result = await oauthRequest({
+          provider,
+          method: str(args, 'method') || 'GET',
+          url,
+          headers: (args.headers as Record<string, string>) ?? undefined,
+          body: args.body === undefined ? undefined : String(args.body),
+        });
+        return {
+          ok: result.status >= 200 && result.status < 300,
+          content: `HTTP ${result.status}\n${result.body}`,
+          summary: `OAuth request to ${provider}: ${result.status}.`,
+        };
+      } catch (error) {
+        return { ok: false, content: (error as Error).message, summary: 'OAuth request failed.' };
+      }
     },
   },
   {

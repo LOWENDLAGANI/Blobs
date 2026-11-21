@@ -1,7 +1,8 @@
 import { useCallback, useEffect, useState } from 'react';
 import { api, del, post } from '../api.ts';
 import { ComputerConnect, EmailConnect, PhoneConnect } from '../components/connectors.tsx';
-import { Badge, Button, Card, Icon, PageHeader, useToast } from '../ui.tsx';
+import { Badge, Button, Card, Field, Icon, Input, Modal, PageHeader, Select, useToast } from '../ui.tsx';
+import type { OAuthConnection } from '../types.ts';
 
 interface IntegrationItem {
   key: string;
@@ -69,17 +70,51 @@ export function IntegrationsPage() {
   const [busy, setBusy] = useState(false);
   const [shotTs, setShotTs] = useState<number | null>(null);
   const [shotBusy, setShotBusy] = useState(false);
+  const [connections, setConnections] = useState<OAuthConnection[]>([]);
+  const [oauthOpen, setOauthOpen] = useState(false);
+  const [oauthForm, setOauthForm] = useState({ provider: 'github', clientId: '', clientSecret: '', scopes: '' });
+  const [oauthBusy, setOauthBusy] = useState(false);
+
+  const disconnectOAuth = async (provider: string): Promise<void> => {
+    setBusy(true);
+    try {
+      await del(`/api/oauth/connections/${provider}`);
+      toast('Disconnected.', 'info');
+      await load();
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  const connectOAuth = async (): Promise<void> => {
+    if (!oauthForm.clientId.trim()) return toast('Client id is required.', 'bad');
+    setOauthBusy(true);
+    try {
+      const result = await post<{ url: string }>('/api/oauth/start', {
+        provider: oauthForm.provider,
+        clientId: oauthForm.clientId,
+        clientSecret: oauthForm.clientSecret,
+        scopes: oauthForm.scopes,
+      });
+      window.location.href = result.url;
+    } catch (error) {
+      toast((error as Error).message, 'bad');
+      setOauthBusy(false);
+    }
+  };
 
   const load = useCallback(async () => {
     try {
-      const [integrations, toolList, machineList] = await Promise.all([
+      const [integrations, toolList, machineList, oauthList] = await Promise.all([
         api<{ items: IntegrationItem[] }>('/api/integrations'),
         api<ToolInfo[]>('/api/settings/tools'),
         api<{ items: MachineItem[] }>('/api/machines'),
+        api<{ items: OAuthConnection[] }>('/api/oauth/connections'),
       ]);
       setItems(integrations.items);
       setTools(toolList);
       setMachines(machineList.items);
+      setConnections(oauthList.items);
     } catch (error) {
       toast((error as Error).message, 'bad');
     }
@@ -298,6 +333,38 @@ export function IntegrationsPage() {
         ))}
       </div>
 
+      <p className="section-title">OAuth connections</p>
+      <Card className="stack">
+        <div className="row-between">
+          <div>
+            <h3>Connected accounts</h3>
+            <p className="muted tiny">GitHub, Google and other OAuth providers BLOBS can act on your behalf with.</p>
+          </div>
+          <Button size="sm" variant="outline" onClick={() => setOauthOpen(true)}>
+            <Icon name="plus" size={14} /> Connect account
+          </Button>
+        </div>
+        {connections.length === 0 && <p className="muted small">No OAuth accounts connected yet.</p>}
+        {connections.map((connection) => (
+          <div key={connection.provider} className="log-line" style={{ alignItems: 'flex-start' }}>
+            <span className="dot live" style={{ marginTop: 7 }} />
+            <div className="log-body">
+              <div className="row" style={{ gap: 8 }}>
+                <strong>{connection.provider}</strong>
+                {connection.account && <Badge tone="good">{connection.account}</Badge>}
+              </div>
+              {connection.scopes && <p className="muted tiny">{connection.scopes}</p>}
+              <p className="muted tiny">Connected {new Date(connection.connectedAt).toLocaleString()}</p>
+              <div className="row" style={{ gap: 6, marginTop: 6 }}>
+                <Button size="sm" variant="quiet" onClick={() => void disconnectOAuth(connection.provider)}>
+                  Disconnect
+                </Button>
+              </div>
+            </div>
+          </div>
+        ))}
+      </Card>
+
       {shotTs && (
         <Card className="stack" >
           <div className="row-between">
@@ -365,6 +432,38 @@ export function IntegrationsPage() {
           }}
         />
       )}
+      {oauthOpen && (
+        <Modal title="Connect an OAuth account" onClose={() => setOauthOpen(false)} wide>
+          <p className="note" style={{ marginBottom: 16 }}>
+            Create an OAuth app in the provider's developer console, set its redirect URI to this app's
+            <code> /oauth/callback</code>, then paste the client id (and secret for confidential clients).
+          </p>
+          <Field label="Provider">
+            <Select value={oauthForm.provider} onChange={(event) => setOauthForm({ ...oauthForm, provider: event.target.value })}>
+              <option value="github">GitHub</option>
+              <option value="google">Google</option>
+            </Select>
+          </Field>
+          <Field label="Client id">
+            <Input value={oauthForm.clientId} onChange={(event) => setOauthForm({ ...oauthForm, clientId: event.target.value })} />
+          </Field>
+          <Field label="Client secret (optional for PKCE public clients)" hint="Stored encrypted and never shown again.">
+            <Input type="password" value={oauthForm.clientSecret} onChange={(event) => setOauthForm({ ...oauthForm, clientSecret: event.target.value })} />
+          </Field>
+          <Field label="Scopes (optional)" hint="Leave blank for the provider's sensible default.">
+            <Input value={oauthForm.scopes} onChange={(event) => setOauthForm({ ...oauthForm, scopes: event.target.value })} />
+          </Field>
+          <div className="modal-actions">
+            <Button variant="quiet" onClick={() => setOauthOpen(false)}>
+              Cancel
+            </Button>
+            <Button busy={oauthBusy} onClick={() => void connectOAuth()}>
+              Start connection
+            </Button>
+          </div>
+        </Modal>
+      )}
+
       {editing === 'computer' && (
         <ComputerConnect
           onClose={() => setEditing(null)}

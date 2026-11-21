@@ -146,6 +146,14 @@ export interface Responsibility {
   updated_at: number;
 }
 
+export interface OAuthConnection {
+  provider: string;
+  account: string | null;
+  scopes: string;
+  accessExpiresAt: number | null;
+  connectedAt: number;
+}
+
 export interface MemoryItem {
   id: string;
   kind: string;

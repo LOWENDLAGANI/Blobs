@@ -335,6 +335,16 @@ async function main(): Promise<void> {
     notifications: { telegram: { enabled: false, chatId: '' }, webhook: { enabled: false, url: '' } },
   });
 
+  console.log('\nOAuth connectors');
+  const oauthStart = await call<{ url: string; state: string }>('POST', '/api/oauth/start', {
+    provider: 'github',
+    clientId: 'smoke-client',
+    scopes: 'read:user',
+  });
+  check('oauth start returns an authorization url', oauthStart.status === 200 && oauthStart.data.url.includes('github.com/login/oauth/authorize') && oauthStart.data.url.includes('code_challenge='));
+  const oauthConnections = await call<{ items: unknown[] }>('GET', '/api/oauth/connections');
+  check('oauth connections list works', oauthConnections.status === 200);
+
   console.log('\nEmergency stop');
   await call('POST', '/api/settings/autonomy', { state: 'stopped' });
   const blocked = await chat('Send an email to someone@example.com right now.');
