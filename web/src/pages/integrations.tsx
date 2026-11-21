@@ -21,6 +21,35 @@ interface ToolInfo {
   risk: string;
 }
 
+interface MachineLink {
+  label: string;
+  url: string;
+}
+
+interface MachineItem {
+  key: 'host' | 'computer';
+  name: string;
+  provider: string;
+  state: 'running' | 'local' | 'connected' | 'disabled' | 'disconnected';
+  id: string | null;
+  detail: string;
+  links: MachineLink[];
+}
+
+function machineTone(state: MachineItem['state']): 'good' | 'info' | 'warn' {
+  if (state === 'running' || state === 'connected') return 'good';
+  if (state === 'local') return 'info';
+  return 'warn';
+}
+
+const MACHINE_STATE_LABELS: Record<MachineItem['state'], string> = {
+  running: 'running',
+  local: 'this machine',
+  connected: 'connected',
+  disabled: 'switched off',
+  disconnected: 'not connected',
+};
+
 const ICONS: Record<string, string> = {
   research: 'search',
   files: 'projects',
@@ -35,6 +64,7 @@ export function IntegrationsPage() {
   const toast = useToast();
   const [items, setItems] = useState<IntegrationItem[]>([]);
   const [tools, setTools] = useState<ToolInfo[]>([]);
+  const [machines, setMachines] = useState<MachineItem[]>([]);
   const [editing, setEditing] = useState<'email' | 'phone' | 'computer' | null>(null);
   const [busy, setBusy] = useState(false);
   const [shotTs, setShotTs] = useState<number | null>(null);
@@ -42,12 +72,14 @@ export function IntegrationsPage() {
 
   const load = useCallback(async () => {
     try {
-      const [integrations, toolList] = await Promise.all([
+      const [integrations, toolList, machineList] = await Promise.all([
         api<{ items: IntegrationItem[] }>('/api/integrations'),
         api<ToolInfo[]>('/api/settings/tools'),
+        api<{ items: MachineItem[] }>('/api/machines'),
       ]);
       setItems(integrations.items);
       setTools(toolList);
+      setMachines(machineList.items);
     } catch (error) {
       toast((error as Error).message, 'bad');
     }
@@ -120,6 +152,58 @@ export function IntegrationsPage() {
       />
 
       <div className="stack">
+        {machines.length > 0 && (
+          <>
+            <p className="section-title" style={{ marginTop: 0 }}>Machines</p>
+            <div className="grid-2">
+              {machines.map((machine) => (
+                <Card key={machine.key} className="stack">
+                  <div className="row-between">
+                    <div className="row" style={{ gap: 12 }}>
+                      <span className="avatar-lg">
+                        <Icon name={machine.key === 'host' ? 'pulse' : 'bolt'} size={19} />
+                      </span>
+                      <div>
+                        <h3>{machine.name}</h3>
+                        <p className="muted tiny">{machine.provider}</p>
+                      </div>
+                    </div>
+                    <Badge tone={machineTone(machine.state)}>{MACHINE_STATE_LABELS[machine.state]}</Badge>
+                  </div>
+
+                  <p className="small" style={{ color: 'var(--ink-2)' }}>
+                    {machine.detail}
+                  </p>
+
+                  {machine.id && (
+                    <p className="muted tiny">
+                      Machine <code>{machine.id}</code>
+                    </p>
+                  )}
+
+                  <div className="row" style={{ gap: 6 }}>
+                    {machine.links.map((link) => (
+                      <a
+                        key={link.url}
+                        className="btn btn-outline btn-sm"
+                        href={link.url}
+                        target="_blank"
+                        rel="noreferrer"
+                      >
+                        {link.label}
+                      </a>
+                    ))}
+                  </div>
+
+                  {machine.key === 'computer' && (
+                    <p className="muted tiny">Connect, replace the key or reset it in the Cloud computer card below.</p>
+                  )}
+                </Card>
+              ))}
+            </div>
+          </>
+        )}
+
         {items.map((item) => (
           <Card key={item.key} className="stack">
             <div className="row-between">

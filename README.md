@@ -152,6 +152,40 @@ with a volume. It is **not** deployable to Cloudflare Workers/Sites, which canno
 disk. Free 24/7 hosting with a persistent volume is increasingly rare — plan for either a ~$2–5/month instance or a
 machine you own. The app never silently upgrades itself to a paid service.
 
+## Deployment: a Daytona sandbox that stays awake
+
+[Daytona](https://www.daytona.io) is the supported always-on host: a Linux sandbox with a real disk, which can be told not
+to sleep. That is the piece a free PaaS usually takes away — idle apps are stopped, and a stopped BLOBS cannot run its
+scheduler or finish a background task.
+
+```bash
+export DAYTONA_API_KEY=...      # app.daytona.io → Keys
+npm run deploy:daytona          # create (or reuse) the sandbox, build, start, print the URL
+
+node scripts/daytona.ts status  # sandbox state and public URL
+node scripts/daytona.ts logs    # last 200 lines of the server log
+node scripts/daytona.ts stop    # take it offline; the disk, database and workspace are kept
+node scripts/daytona.ts start   # bring the same sandbox back and relaunch BLOBS
+node scripts/daytona.ts destroy # delete the sandbox and everything on it
+```
+
+The script creates a sandbox named `blobs` from `node:22` with `idleExpirySeconds: DISABLED`, so inactivity never stops
+it, and exposes port 3000 at an HTTPS preview URL. Re-running `npm run deploy:daytona` reuses that sandbox, replaces only
+the code, and leaves `.data/` alone — memory, tasks and encrypted integration keys survive a redeploy. The sandbox id and
+URL are recorded in `.daytona.json` (git-ignored). If you create the sandbox in the Daytona dashboard instead, set
+**auto-stop to `0`** yourself.
+
+What to keep in mind:
+
+- The preview URL is public. BLOBS still asks for the owner passphrase, so make that passphrase strong: it is the only
+  thing in front of the login. Stop the sandbox or remove the preview endpoint to take it offline.
+- Without auto-stop, the sandbox bills for as long as it runs. The script clears the idle policy, but a project-level
+  wall-clock timeout can still apply — check Daytona's pricing and lifecycle defaults before leaving it up.
+- The disk survives `stop`/`start`, not `destroy`. For memory that outlives the sandbox, point `DB_URL` at Turso (above)
+  or keep a copy of `.data/`.
+- Your local `.env` is read at deploy time and passed to the remote server process. It is not uploaded as a file, and
+  `DAYTONA_API_KEY` is filtered out so the hosting credential never enters the sandbox.
+
 ## Tools
 
 | Tool | Needs | Risk |
@@ -187,6 +221,10 @@ enforced in server code — not by asking the model nicely.
 BLOBS can own a real Linux machine through [E2B](https://e2b.dev): not a simulator, an isolated cloud VM with
 persistent files, a shell, any language runtime, package installation, long-running servers with public HTTPS URLs, and
 an optional graphical desktop.
+
+This is the agent's machine, not the machine BLOBS runs on. Hosting comes from the Daytona sandbox above, and the two
+use separate keys (`DAYTONA_API_KEY` for the host, `E2B_API_KEY` for the computer). Neither key is shared with the other
+provider, and the Daytona key is never placed in the E2B environment.
 
 Connect it in **Integrations → Cloud computer** with an E2B API key. Sandboxes are created on first use, their ids are
 stored in SQLite, and later actions reconnect (auto-resuming a paused sandbox) so work continues on the same machine.
@@ -274,11 +312,12 @@ server/
   agent/              prompt, tool registry, agent loop, chat, tasks, scheduler
   comms/              email (SMTP/IMAP) and phone (Twilio)
   computer/           E2B sandbox manager (shell, code, files, servers, desktop)
+  host.ts             Daytona host + E2B computer status for Integrations
 web/src/
   app.tsx             auth gate, rail, live status, notifications
   voice.ts            speech engine (recognition, synthesis, barge-in, VAD)
   pages/              console, tasks, projects, memory, activity, comms, integrations, settings
-scripts/              smoke + tools verification
+scripts/              smoke + tools verification, Daytona host deploy
 ```
 
 The database lives wherever `DB_URL` points (`.data/blobs.db` by default, or Turso). Everything else — the file

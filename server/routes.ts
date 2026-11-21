@@ -99,6 +99,7 @@ import {
   saveComputerKey,
   screenshotPath,
 } from './computer/e2b.ts';
+import { machinesStatus } from './host.ts';
 import fs from 'node:fs';
 import { clamp, now, truncate } from './util.ts';
 
@@ -678,6 +679,8 @@ export async function registerRoutes(app: FastifyInstance): Promise<void> {
   });
 
   /* ---------------- cloud computer (E2B) ---------------- */
+
+  app.get('/api/machines', async () => await machinesStatus());
 
   app.get('/api/computer/status', async () => await computerStatus());
 
