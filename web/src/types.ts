@@ -114,6 +114,19 @@ export interface Project {
   open_tasks?: number;
 }
 
+export interface Deliverable {
+  id: string;
+  task_id: string | null;
+  conversation_id: string | null;
+  responsibility_id: string | null;
+  title: string;
+  kind: 'markdown' | 'html';
+  body: string;
+  public_token: string | null;
+  public_expires_at: number | null;
+  created_at: number;
+}
+
 export interface Responsibility {
   id: string;
   project_id: string | null;

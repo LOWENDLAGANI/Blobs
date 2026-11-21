@@ -181,6 +181,21 @@ CREATE TABLE IF NOT EXISTS responsibilities (
 );
 CREATE INDEX IF NOT EXISTS idx_responsibilities_due ON responsibilities(status, next_run_at);
 
+CREATE TABLE IF NOT EXISTS deliverables (
+  id TEXT PRIMARY KEY,
+  task_id TEXT,
+  conversation_id TEXT,
+  responsibility_id TEXT,
+  title TEXT NOT NULL,
+  kind TEXT NOT NULL DEFAULT 'markdown',
+  body TEXT NOT NULL DEFAULT '',
+  public_token TEXT,
+  public_expires_at INTEGER,
+  created_at INTEGER NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_deliverables_created ON deliverables(created_at DESC);
+CREATE UNIQUE INDEX IF NOT EXISTS idx_deliverables_token ON deliverables(public_token);
+
 CREATE TABLE IF NOT EXISTS approvals (
   id TEXT PRIMARY KEY,
   kind TEXT NOT NULL,

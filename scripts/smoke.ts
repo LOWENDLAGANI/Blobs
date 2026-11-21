@@ -292,6 +292,25 @@ async function main(): Promise<void> {
   const respPaused = await call('PATCH', `/api/responsibilities/${resp.data.responsibility.id}`, { status: 'paused' });
   check('responsibility paused', respPaused.status === 200);
 
+  console.log('\nReview packets');
+  const packet = await call<{ deliverable: { id: string } }>('POST', '/api/deliverables', {
+    title: 'Smoke report',
+    body: '# Report\n\nAll good.',
+    kind: 'markdown',
+  });
+  check('review packet created', packet.status === 200 && Boolean(packet.data.deliverable.id));
+  const packets = await call<{ items: unknown[] }>('GET', '/api/deliverables');
+  check('review packet listed', packets.data.items.length >= 1);
+  const published = await call<{ url: string }>('POST', `/api/deliverables/${packet.data.deliverable.id}/publish`, { hours: 1 });
+  check('review packet published', published.status === 200 && published.data.url.startsWith('/d/'));
+  const publicPage = await fetch(`${BASE}${published.data.url}`);
+  const publicBody = await publicPage.text();
+  check('public link serves the packet', publicPage.status === 200 && publicBody.includes('Smoke report'));
+  check('public link carries no session', !publicBody.includes('passphrase'));
+  await call('DELETE', `/api/deliverables/${packet.data.deliverable.id}/publish`);
+  const revoked = await fetch(`${BASE}${published.data.url}`);
+  check('public link can be revoked', revoked.status === 404);
+
   console.log('\nEmergency stop');
   await call('POST', '/api/settings/autonomy', { state: 'stopped' });
   const blocked = await chat('Send an email to someone@example.com right now.');

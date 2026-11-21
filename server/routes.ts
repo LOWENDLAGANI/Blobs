@@ -74,6 +74,15 @@ import {
   runResponsibility,
   updateResponsibility,
 } from './agent/responsibilities.ts';
+import {
+  createDeliverable,
+  deleteDeliverable,
+  getDeliverable,
+  getPublicDeliverable,
+  listDeliverables,
+  publishDeliverable,
+  unpublishDeliverable,
+} from './deliverables.ts';
 import { schedulerState } from './agent/scheduler.ts';
 import { toolCatalog } from './agent/tools.ts';
 import { decideApproval, listApprovals, parseApprovalPayload } from './approvals.ts';
@@ -135,6 +144,30 @@ function sseWrite(reply: FastifyReply, data: unknown): void {
 
 function bad(reply: FastifyReply, message: string, status = 400): void {
   reply.code(status).send({ error: message });
+}
+
+function escapeHtml(text: string): string {
+  return text.replace(/[&<>"']/g, (character) => {
+    switch (character) {
+      case '&': return '&amp;';
+      case '<': return '&lt;';
+      case '>': return '&gt;';
+      case '"': return '&quot;';
+      default: return '&#39;';
+    }
+  });
+}
+
+/** Standalone page for a published review packet; never shares the app session. */
+function packetPage(title: string, body: string): string {
+  return `<!doctype html><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>${escapeHtml(title)}</title>
+<body style="margin:0;background:#f6f3ec;color:#1f1d1a;font:16px/1.6 ui-sans-serif,system-ui,sans-serif">
+<main style="max-width:820px;margin:0 auto;padding:48px 22px 96px">
+<p style="font:600 12px/1.4 ui-monospace,monospace;letter-spacing:.14em;text-transform:uppercase;color:#8a8377">BLOBS review packet</p>
+<h1 style="font-size:30px;line-height:1.2;margin:8px 0 26px">${escapeHtml(title)}</h1>
+${body}
+</main></body>`;
 }
 
 export async function registerRoutes(app: FastifyInstance): Promise<void> {
@@ -548,6 +581,66 @@ export async function registerRoutes(app: FastifyInstance): Promise<void> {
   });
 
   app.get('/api/inbox', async () => await fetchInbox(15));
+
+  /* ---------------- review packets ---------------- */
+
+  app.get('/api/deliverables', async () => ({ items: await listDeliverables() }));
+
+  app.post('/api/deliverables', async (request, reply) => {
+    const body = (request.body ?? {}) as { title?: string; body?: string; kind?: string };
+    if (!body.title?.trim()) return bad(reply, 'Give the packet a title.');
+    const deliverable = await createDeliverable({
+      title: body.title,
+      body: String(body.body ?? ''),
+      kind: body.kind === 'html' ? 'html' : 'markdown',
+    });
+    return { ok: true, deliverable };
+  });
+
+  app.get('/api/deliverables/:id', async (request, reply) => {
+    const { id } = request.params as { id: string };
+    const deliverable = await getDeliverable(id);
+    if (!deliverable) return bad(reply, 'Packet not found.', 404);
+    return { deliverable };
+  });
+
+  app.post('/api/deliverables/:id/publish', async (request, reply) => {
+    const { id } = request.params as { id: string };
+    const body = (request.body ?? {}) as { hours?: number };
+    const published = await publishDeliverable(id, body.hours);
+    if (!published) return bad(reply, 'Packet not found.', 404);
+    return { ok: true, url: `/d/${published.token}`, expiresAt: published.expiresAt };
+  });
+
+  app.delete('/api/deliverables/:id/publish', async (request) => {
+    const { id } = request.params as { id: string };
+    return { ok: await unpublishDeliverable(id) };
+  });
+
+  app.delete('/api/deliverables/:id', async (request) => {
+    const { id } = request.params as { id: string };
+    return { ok: await deleteDeliverable(id) };
+  });
+
+  /* ---------------- public review links ---------------- */
+
+  app.get('/d/:token', async (request, reply) => {
+    const { token } = request.params as { token: string };
+    const deliverable = await getPublicDeliverable(token);
+    reply.header('cache-control', 'no-store').header('x-content-type-options', 'nosniff');
+    if (!deliverable) {
+      return reply
+        .code(404)
+        .type('text/html; charset=utf-8')
+        .send(packetPage('Link not found', '<p>This link has expired or was unpublished.</p>'));
+    }
+    reply.header('content-security-policy', "sandbox; default-src 'none'; style-src 'unsafe-inline'");
+    reply.type('text/html; charset=utf-8');
+    if (deliverable.kind === 'html') return reply.send(deliverable.body);
+    return reply.send(
+      packetPage(deliverable.title, `<pre style="white-space:pre-wrap;font:15px/1.65 ui-monospace,monospace">${escapeHtml(deliverable.body)}</pre>`),
+    );
+  });
 
   /* ---------------- responsibilities ---------------- */
 

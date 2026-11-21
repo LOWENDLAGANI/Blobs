@@ -2,6 +2,7 @@ import { all, get, run } from '../db.ts';
 import { id, now, truncate } from '../util.ts';
 import { broadcast, logActivity, notify } from '../activity.ts';
 import { createTask, executeTask, getTask } from './tasks.ts';
+import { createDeliverable } from '../deliverables.ts';
 
 /**
  * Responsibilities: the standing goals BLOBS owns.
@@ -225,6 +226,13 @@ export async function runResponsibility(
       now(),
       responsibilityId,
     );
+    await createDeliverable({
+      title: `${row.title} · run ${row.run_count + 1}`,
+      body: outcome,
+      taskId: task.id,
+      responsibilityId,
+      silent: true,
+    });
     notify({
       title: `${row.title}: progress`,
       body: truncate(outcome, 240),

@@ -15,6 +15,7 @@ import {
   runResponsibility,
   updateResponsibility,
 } from './responsibilities.ts';
+import { createDeliverable, publishDeliverable } from '../deliverables.ts';
 import { createProject, updateProject } from './projects.ts';
 import { sendEmail, emailStatus } from '../comms/email.ts';
 import { placeCall, phoneStatus } from '../comms/phone.ts';
@@ -525,6 +526,48 @@ export const TOOLS: ToolDef[] = [
         ok: true,
         content: rows.map((task) => `- [${task.status}] ${task.title} (${task.id})`).join('\n'),
         summary: `Listed ${rows.length} tasks.`,
+      };
+    },
+  },
+  {
+    name: 'deliver',
+    description:
+      'Hand the owner a finished review packet — a report, draft, plan or summary — as markdown or HTML. Optionally publish it to an unguessable link that expires, for reading on a phone or sharing. Use this when substantial work is done.',
+    parameters: {
+      type: 'object',
+      properties: {
+        title: { type: 'string', description: 'Short title the owner will see.' },
+        body: { type: 'string', description: 'The full packet. Markdown unless kind is html.' },
+        kind: { type: 'string', enum: ['markdown', 'html'] },
+        publish: { type: 'boolean', description: 'Create an expiring public link.' },
+        hours: { type: 'number', description: 'Link lifetime in hours, 1-168. Default 168.' },
+      },
+      required: ['title', 'body'],
+    },
+    risk: 'low',
+    category: 'files',
+    async run(args, context) {
+      const title = str(args, 'title').trim();
+      const body = str(args, 'body');
+      if (!title) return { ok: false, content: 'Give the packet a title.', summary: 'Packet needs a title.' };
+      if (!body.trim()) return { ok: false, content: 'The packet body is empty.', summary: 'Packet needs a body.' };
+      const deliverable = await createDeliverable({
+        title,
+        body,
+        kind: str(args, 'kind') === 'html' ? 'html' : 'markdown',
+        taskId: context.taskId ?? null,
+        conversationId: context.conversationId ?? null,
+      });
+      let link = '';
+      if (args.publish === true) {
+        const published = await publishDeliverable(deliverable.id, num(args, 'hours', 168));
+        if (published) link = `/d/${published.token}`;
+      }
+      return {
+        ok: true,
+        content: `Saved review packet ${deliverable.id}: ${deliverable.title}.${link ? ` Public link: ${link}` : ''}`,
+        summary: `Delivered "${deliverable.title}".`,
+        display: { deliverableId: deliverable.id, url: link || null },
       };
     },
   },
