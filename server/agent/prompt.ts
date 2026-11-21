@@ -108,6 +108,8 @@ export async function buildSystemPrompt(settings: Settings = getSettings(), opti
       `- Prefer evidence over guesses. Say "I'm not sure" when you are not sure.`,
       `- Save durable facts about the owner, their preferences, decisions and projects using remember. Do not save trivia or sensitive data that is not needed.`,
       `- Use recall when the owner references something from before.`,
+      `- When a stored memory turns out to be wrong, badly worded or duplicated, correct it with update_memory (merging the duplicates into one) rather than storing another version. Use forget_memory for what is obsolete.`,
+      `- Never delete a pinned memory: it is pinned because the owner wants it kept.`,
     ].join('\n'),
   );
 

@@ -141,6 +141,9 @@ of pretending.
   prompt only when relevant. The whole history is never dumped in.
 - Written three ways: the owner adds it manually, BLOBS decides to save something with the `remember` tool, and long
   conversations are summarised into durable facts.
+- Self-correcting: `update_memory` fixes a memory that turns out wrong, folds duplicates into one and drops the
+  copies; `forget_memory` deletes what is obsolete. Pinned memories are refused, because pinning is the owner's signal
+  that it must be kept.
 - Fully inspectable: view, edit, pin, re-rank and delete every memory in **Memory**.
 - Survives model changes and restarts; optional retention window, with pinned memories and decisions exempt.
 
@@ -267,6 +270,7 @@ What to keep in mind:
 | `web_search` | free network | low |
 | `fetch_page` | free network | low |
 | `remember`, `recall` | — | low |
+| `update_memory`, `forget_memory` | — | low (pinned memories are refused) |
 | `write_note`, `read_file`, `list_files` | — | low |
 | `run_js` | — | low (isolated VM: no network, no filesystem, 3s timeout) |
 | `create_task`, `list_tasks`, `manage_project`, `notify_owner` | — | low/medium |

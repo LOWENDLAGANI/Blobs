@@ -3,7 +3,15 @@ import { cleanWorkspacePath, listWorkspace, readWorkspaceText, writeWorkspaceTex
 import type { AutonomyLevel } from '../settings.ts';
 import { getSettings } from '../settings.ts';
 import { get } from '../db.ts';
-import { remember, searchMemories, listMemories } from '../memory.ts';
+import {
+  remember,
+  searchMemories,
+  listMemories,
+  updateMemory,
+  deleteMemory,
+  mergeMemories,
+  type MemoryKind,
+} from '../memory.ts';
 import { assertPublicUrl, extractTitle, fetchWithTimeout, htmlToText, truncate } from '../util.ts';
 import type { ToolSchema } from '../llm/types.ts';
 import { createTask, executeTask, getTask, listTaskRows } from './tasks.ts';
@@ -330,8 +338,126 @@ export const TOOLS: ToolDef[] = [
       return {
         ok: true,
         untrusted: true,
-        content: rows.map((row) => `- [${row.kind}] ${row.content}`).join('\n'),
+        // The id is part of the line so update_memory and forget_memory can address it.
+        content: rows.map((row) => `- [${row.kind}] (${row.id}) ${row.content}`).join('\n'),
         summary: `Recalled ${rows.length} memories.`,
+      };
+    },
+  },
+  {
+    name: 'update_memory',
+    description:
+      'Correct a memory you already stored: fix its wording, change its kind, retag it or re-rank its importance. Pass merge_ids to fold duplicate memories into it. Use this instead of storing a second, contradictory memory.',
+    parameters: {
+      type: 'object',
+      properties: {
+        id: { type: 'string', description: 'The memory id shown by recall.' },
+        content: { type: 'string', description: 'Replacement text, in the owner context.' },
+        kind: {
+          type: 'string',
+          enum: ['fact', 'preference', 'project', 'decision', 'lesson', 'person', 'summary', 'note'],
+        },
+        tags: { type: 'array', items: { type: 'string' }, description: 'Replacement tags.' },
+        importance: { type: 'number', description: '1-5, 5 = must never be forgotten.' },
+        pinned: { type: 'boolean', description: 'Pin or unpin the memory.' },
+        merge_ids: {
+          type: 'array',
+          items: { type: 'string' },
+          description: 'Other memories to fold into this one and delete. Pinned memories are refused.',
+        },
+      },
+      required: ['id'],
+    },
+    risk: 'low',
+    category: 'memory',
+    async run(args) {
+      const memoryId = str(args, 'id').trim();
+      if (!memoryId) return { ok: false, content: 'Give the memory id that recall showed.', summary: 'Update needs a memory id.' };
+      const existing = await get<{ id: string }>('SELECT id FROM memories WHERE id = ?', memoryId);
+      if (!existing) return { ok: false, content: `No memory ${memoryId}.`, summary: 'Update failed: no such memory.' };
+
+      const mergeIds = (Array.isArray(args.merge_ids) ? (args.merge_ids as string[]) : [])
+        .map((value) => String(value).trim())
+        .filter((value) => value && value !== memoryId);
+      for (const otherId of mergeIds) {
+        const row = await get<{ pinned: number }>('SELECT pinned FROM memories WHERE id = ?', otherId);
+        if (!row) return { ok: false, content: `No memory ${otherId}.`, summary: 'Merge failed: no such memory.' };
+        if (row.pinned) {
+          return {
+            ok: false,
+            content: `Memory ${otherId} is pinned. Unpin it with pinned: false before merging it away.`,
+            summary: 'Merge refused: pinned memory.',
+          };
+        }
+      }
+
+      const patch: { content?: string; kind?: MemoryKind; tags?: string[]; importance?: number; pinned?: boolean } = {};
+      if (str(args, 'content').trim()) patch.content = str(args, 'content');
+      const kind = str(args, 'kind');
+      const kinds: MemoryKind[] = ['fact', 'preference', 'project', 'decision', 'lesson', 'person', 'summary', 'note'];
+      if (kind && kinds.includes(kind as MemoryKind)) patch.kind = kind as MemoryKind;
+      if (Array.isArray(args.tags)) patch.tags = (args.tags as unknown[]).map((tag) => String(tag));
+      if (args.importance !== undefined) patch.importance = num(args, 'importance', 3);
+      if (typeof args.pinned === 'boolean') patch.pinned = args.pinned;
+
+      if (!Object.keys(patch).length && !mergeIds.length) {
+        return { ok: false, content: 'Nothing to change: give content, kind, tags, importance, pinned or merge_ids.', summary: 'Update had no changes.' };
+      }
+
+      if (Object.keys(patch).length) await updateMemory(memoryId, patch);
+      if (mergeIds.length) await mergeMemories(memoryId, mergeIds);
+
+      return {
+        ok: true,
+        content: `Updated memory ${memoryId}.${mergeIds.length ? ` Merged ${mergeIds.length} more into it.` : ''}`,
+        summary: 'Corrected a memory.',
+        display: { memoryId, merged: mergeIds },
+      };
+    },
+  },
+  {
+    name: 'forget_memory',
+    description:
+      'Delete memories that are wrong, obsolete or duplicated. Prefer update_memory when the fact is still true but worded badly. Pinned memories are refused; unpin them first.',
+    parameters: {
+      type: 'object',
+      properties: {
+        id: { type: 'string', description: 'One memory id from recall.' },
+        ids: { type: 'array', items: { type: 'string' }, description: 'Several memory ids at once.' },
+      },
+    },
+    risk: 'low',
+    category: 'memory',
+    async run(args) {
+      const ids = [...(Array.isArray(args.ids) ? (args.ids as string[]) : []), str(args, 'id')]
+        .map((value) => String(value).trim())
+        .filter(Boolean);
+      if (!ids.length) return { ok: false, content: 'Give a memory id that recall showed.', summary: 'Forget needs a memory id.' };
+
+      const removed: string[] = [];
+      const skipped: string[] = [];
+      for (const memoryId of ids) {
+        const row = await get<{ pinned: number }>('SELECT pinned FROM memories WHERE id = ?', memoryId);
+        if (!row) {
+          skipped.push(`${memoryId} (not found)`);
+          continue;
+        }
+        if (row.pinned) {
+          skipped.push(`${memoryId} (pinned)`);
+          continue;
+        }
+        if (await deleteMemory(memoryId)) removed.push(memoryId);
+      }
+
+      const parts = [
+        removed.length ? `Forgot ${removed.length}: ${removed.join(', ')}.` : '',
+        skipped.length ? `Skipped ${skipped.join(', ')}.` : '',
+      ].filter(Boolean);
+      return {
+        ok: removed.length > 0,
+        content: parts.join(' ') || 'Nothing was deleted.',
+        summary: `Forgot ${removed.length} ${removed.length === 1 ? 'memory' : 'memories'}.`,
+        display: { removed, skipped },
       };
     },
   },

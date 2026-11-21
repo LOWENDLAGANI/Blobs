@@ -114,7 +114,62 @@ export async function deleteMemory(memoryId: string): Promise<boolean> {
   const existing = await get<{ id: string }>('SELECT id FROM memories WHERE id = ?', memoryId);
   if (!existing) return false;
   await run('DELETE FROM memories WHERE id = ?', memoryId);
+  logActivity({ level: 'info', category: 'memory', message: `Forgot memory ${memoryId}.`, meta: { memoryId } });
   return true;
+}
+
+/**
+ * Fold duplicates into one memory: the primary keeps its id, the others are
+ * deleted. Lines are combined without repeats, tags unioned, importance takes
+ * the highest value and pinning is preserved.
+ */
+export async function mergeMemories(primaryId: string, otherIds: string[]): Promise<MemoryRow | null> {
+  const primary = await get<MemoryRow>('SELECT * FROM memories WHERE id = ?', primaryId);
+  if (!primary) return null;
+
+  const sources: MemoryRow[] = [];
+  for (const otherId of otherIds) {
+    if (otherId === primaryId) continue;
+    const row = await get<MemoryRow>('SELECT * FROM memories WHERE id = ?', otherId);
+    if (row) sources.push(row);
+  }
+  if (!sources.length) return primary;
+
+  const seen = new Set<string>();
+  const lines: string[] = [];
+  for (const text of [primary.content, ...sources.map((row) => row.content)]) {
+    for (const line of text.split('\n')) {
+      const trimmed = line.trim();
+      if (!trimmed || seen.has(trimmed.toLowerCase())) continue;
+      seen.add(trimmed.toLowerCase());
+      lines.push(trimmed);
+    }
+  }
+
+  const tags = [...new Set([primary.tags, ...sources.map((row) => row.tags)].join(' ').split(/\s+/).filter(Boolean))].join(' ');
+  const importance = Math.max(primary.importance, ...sources.map((row) => row.importance));
+  const pinned = [primary, ...sources].some((row) => row.pinned === 1) ? 1 : 0;
+
+  await run(
+    'UPDATE memories SET content = ?, tags = ?, importance = ?, pinned = ?, updated_at = ? WHERE id = ?',
+    truncate(lines.join('\n'), 4000),
+    tags,
+    importance,
+    pinned,
+    now(),
+    primaryId,
+  );
+  await run(
+    `DELETE FROM memories WHERE id IN (${sources.map(() => '?').join(', ')})`,
+    ...sources.map((row) => row.id),
+  );
+  logActivity({
+    level: 'info',
+    category: 'memory',
+    message: `Merged ${sources.length} ${sources.length === 1 ? 'memory' : 'memories'} into ${primaryId}.`,
+    meta: { memoryId: primaryId, merged: sources.map((row) => row.id) },
+  });
+  return get<MemoryRow>('SELECT * FROM memories WHERE id = ?', primaryId);
 }
 
 export async function listMemories(options: { limit?: number; kind?: string; query?: string } = {}): Promise<MemoryRow[]> {
