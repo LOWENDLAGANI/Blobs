@@ -1041,7 +1041,7 @@ export async function registerRoutes(app: FastifyInstance): Promise<void> {
 
   app.post('/api/settings/secret', async (request, reply) => {
     const body = (request.body ?? {}) as { key?: string; value?: string };
-    const allowed = new Set(['telegram:botToken', 'webhook:secret']);
+    const allowed = new Set(['telegram:botToken', 'webhook:secret', 'exa:apiKey']);
     if (!body.key || !allowed.has(body.key)) return bad(reply, 'Unknown secret.');
     if (!body.value?.trim()) return bad(reply, 'Paste the value first.');
     await setSecret(body.key, body.value.trim());

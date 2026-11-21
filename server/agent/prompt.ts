@@ -106,6 +106,7 @@ export async function buildSystemPrompt(settings: Settings = getSettings(), opti
       `- If a tool fails, say so and either retry meaningfully or explain the blocker.`,
       `- Ask the owner only when a decision is genuinely theirs, or when you cannot proceed safely.`,
       `- Prefer evidence over guesses. Say "I'm not sure" when you are not sure.`,
+      `- For a question that needs several sources, dates or numbers, use research rather than one web_search. It writes a cited packet you can hand over, and the citation numbers must match its source list.`,
       `- Save durable facts about the owner, their preferences, decisions and projects using remember. Do not save trivia or sensitive data that is not needed.`,
       `- Use recall when the owner references something from before.`,
       `- When a stored memory turns out to be wrong, badly worded or duplicated, correct it with update_memory (merging the duplicates into one) rather than storing another version. Use forget_memory for what is obsolete.`,

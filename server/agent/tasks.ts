@@ -17,7 +17,10 @@ export type TaskStatus =
   | 'failed'
   | 'cancelled';
 
-export type TaskSchedule = { type: 'once' } | { type: 'interval'; minutes: number };
+export type TaskSchedule =
+  | { type: 'once' }
+  | { type: 'interval'; minutes: number }
+  | { type: 'clock'; at: string; days?: number[]; tz?: string; until?: number };
 
 export interface TaskRow {
   id: string;
@@ -59,24 +62,217 @@ interface Checkpoint {
   approvedResults?: { tool: string; content: string }[];
 }
 
+const DAY_NAMES: Record<string, number> = {
+  sun: 0,
+  sunday: 0,
+  mon: 1,
+  monday: 1,
+  tue: 2,
+  tues: 2,
+  tuesday: 2,
+  wed: 3,
+  weds: 3,
+  wednesday: 3,
+  thu: 4,
+  thur: 4,
+  thurs: 4,
+  thursday: 4,
+  fri: 5,
+  friday: 5,
+  sat: 6,
+  saturday: 6,
+};
+
+function parseClockTime(text: string): { hour: number; minute: number } | null {
+  const match = /^(\d{1,2})(?::(\d{2}))?\s*(am|pm)?$/i.exec(text.trim());
+  if (!match) return null;
+  let hour = Number(match[1]);
+  const minute = Number(match[2] ?? 0);
+  const meridiem = (match[3] ?? '').toLowerCase();
+  if (!Number.isFinite(hour) || !Number.isFinite(minute) || minute > 59) return null;
+  if (meridiem === 'pm' && hour < 12) hour += 12;
+  if (meridiem === 'am' && hour === 12) hour = 0;
+  if (hour > 23) return null;
+  return { hour, minute };
+}
+
+function parseDays(text: string): number[] | null {
+  const cleaned = text.toLowerCase().trim();
+  if (!cleaned) return null;
+  if (/\bweekdays?\b/.test(cleaned)) return [1, 2, 3, 4, 5];
+  if (/\bweekends?\b/.test(cleaned)) return [0, 6];
+  const days: number[] = [];
+  for (const part of cleaned.split(/[,+/]|\band\b/)) {
+    for (const token of part.trim().split(/\s+/)) {
+      const key = token.replace(/[^a-z]/g, '');
+      if (key && key in DAY_NAMES) days.push(DAY_NAMES[key] as number);
+    }
+  }
+  return days.length ? [...new Set(days)].sort((a, b) => a - b) : null;
+}
+
+/**
+ * Schedules accept three shapes: once, an interval, or a local clock time.
+ * Examples: "daily", "hourly", "every:30m", "09:00", "weekdays 09:00",
+ * "mon,wed,fri 18:00 until 2026-12-31". Clock times use the owner's timezone.
+ */
 export function normalizeSchedule(raw: unknown): TaskSchedule {
   if (!raw) return { type: 'once' };
+
   if (typeof raw === 'object' && raw !== null && 'type' in raw) {
-    const value = raw as { type?: string; minutes?: number };
+    const value = raw as {
+      type?: string;
+      minutes?: number;
+      at?: string;
+      days?: unknown;
+      tz?: string;
+      until?: number;
+    };
     if (value.type === 'interval' && Number(value.minutes) > 0) {
       return { type: 'interval', minutes: Math.max(1, Math.round(Number(value.minutes))) };
     }
-  }
-  if (typeof raw === 'string') {
-    const every = /^every:(\d+)(m|h|d)$/.exec(raw.trim());
-    if (raw === 'hourly') return { type: 'interval', minutes: 60 };
-    if (raw === 'daily') return { type: 'interval', minutes: 1440 };
-    if (every) {
-      const unit = every[2] === 'h' ? 60 : every[2] === 'd' ? 1440 : 1;
-      return { type: 'interval', minutes: Math.max(1, Number(every[1]) * unit) };
+    if (value.type === 'clock') {
+      const time = parseClockTime(String(value.at ?? ''));
+      if (time) {
+        const schedule: TaskSchedule = {
+          type: 'clock',
+          at: `${String(time.hour).padStart(2, '0')}:${String(time.minute).padStart(2, '0')}`,
+        };
+        const days = Array.isArray(value.days)
+          ? value.days
+              .map((day) => Number(day))
+              .filter((day) => Number.isInteger(day) && day >= 0 && day <= 6)
+          : [];
+        if (days.length) schedule.days = [...new Set(days)].sort((a, b) => a - b);
+        if (typeof value.tz === 'string' && value.tz.trim()) schedule.tz = value.tz.trim();
+        if (Number(value.until) > 0) schedule.until = Number(value.until);
+        return schedule;
+      }
     }
+    return { type: 'once' };
   }
-  return { type: 'once' };
+
+  if (typeof raw !== 'string') return { type: 'once' };
+  let text = raw.trim().toLowerCase();
+  if (!text || text === 'once') return { type: 'once' };
+  if (text === 'hourly') return { type: 'interval', minutes: 60 };
+  if (text === 'daily') return { type: 'interval', minutes: 1440 };
+
+  const every = /^every:(\d+)(m|h|d)$/.exec(text);
+  if (every) {
+    const unit = every[2] === 'h' ? 60 : every[2] === 'd' ? 1440 : 1;
+    return { type: 'interval', minutes: Math.max(1, Number(every[1]) * unit) };
+  }
+
+  let until: number | undefined;
+  const untilMatch = /\buntil\s+(\d{4}-\d{2}-\d{2})\b/.exec(text);
+  if (untilMatch) {
+    const parsedUntil = Date.parse(`${untilMatch[1]}T23:59:59Z`);
+    if (Number.isFinite(parsedUntil)) until = parsedUntil;
+    text = text.replace(untilMatch[0], ' ').trim();
+  }
+
+  const timeMatch = /(\d{1,2}:\d{2})\b/.exec(text) ?? /(\d{1,2}\s*(?:am|pm))\b/.exec(text);
+  if (!timeMatch) return { type: 'once' };
+  const time = parseClockTime(timeMatch[1]);
+  if (!time) return { type: 'once' };
+
+  const prefix = text
+    .replace(timeMatch[0], ' ')
+    .replace(/\bat\b/g, ' ')
+    .replace(/\s+/g, ' ')
+    .trim();
+  const days = parseDays(prefix);
+  const schedule: TaskSchedule = {
+    type: 'clock',
+    at: `${String(time.hour).padStart(2, '0')}:${String(time.minute).padStart(2, '0')}`,
+  };
+  if (days) schedule.days = days;
+  if (until) schedule.until = until;
+  return schedule;
+}
+
+interface ZonedParts {
+  year: number;
+  month: number;
+  day: number;
+  hour: number;
+  minute: number;
+}
+
+function zonedParts(ts: number, tz: string): ZonedParts {
+  const formatter = new Intl.DateTimeFormat('en-US', {
+    timeZone: tz,
+    year: 'numeric',
+    month: '2-digit',
+    day: '2-digit',
+    hour: '2-digit',
+    minute: '2-digit',
+    hour12: false,
+  });
+  const parts: Record<string, number> = {};
+  for (const part of formatter.formatToParts(new Date(ts))) {
+    if (part.type !== 'literal') parts[part.type] = Number(part.value);
+  }
+  return {
+    year: parts.year ?? 1970,
+    month: parts.month ?? 1,
+    day: parts.day ?? 1,
+    hour: (parts.hour ?? 0) % 24,
+    minute: parts.minute ?? 0,
+  };
+}
+
+function tzOffsetMs(ts: number, tz: string): number {
+  const parts = zonedParts(ts, tz);
+  const asUtc = Date.UTC(parts.year, parts.month - 1, parts.day, parts.hour, parts.minute);
+  return asUtc - ts;
+}
+
+/** Convert a wall-clock time in `tz` to an epoch timestamp, handling DST twice. */
+function zonedTimeToUtc(
+  year: number,
+  month: number,
+  day: number,
+  hour: number,
+  minute: number,
+  tz: string,
+): number {
+  const guess = Date.UTC(year, month - 1, day, hour, minute);
+  let ts = guess - tzOffsetMs(guess, tz);
+  ts = guess - tzOffsetMs(ts, tz);
+  return ts;
+}
+
+/** Next time this schedule should run, or null when it has no future run. */
+export function nextRunAt(schedule: TaskSchedule, from = now()): number | null {
+  if (schedule.type === 'once') return null;
+  if (schedule.type === 'interval') {
+    return from + Math.max(1, schedule.minutes) * 60_000;
+  }
+
+  const time = parseClockTime(schedule.at);
+  if (!time) return from + 86_400_000;
+  const tz = schedule.tz || getSettings().owner.timezone || 'UTC';
+  const base = zonedParts(from, tz);
+  const until = schedule.until ?? null;
+
+  for (let offset = 0; offset < 14; offset += 1) {
+    const day = new Date(Date.UTC(base.year, base.month - 1, base.day + offset));
+    if (schedule.days?.length && !schedule.days.includes(day.getUTCDay())) continue;
+    const candidate = zonedTimeToUtc(
+      day.getUTCFullYear(),
+      day.getUTCMonth() + 1,
+      day.getUTCDate(),
+      time.hour,
+      time.minute,
+      tz,
+    );
+    if (candidate <= from + 30_000) continue;
+    if (until !== null && candidate > until) return null;
+    return candidate;
+  }
+  return null;
 }
 
 export async function createTask(input: {
@@ -497,12 +693,13 @@ export async function executeTask(taskId: string): Promise<void> {
     }
 
     const schedule = safeJson<TaskSchedule>(task.schedule, { type: 'once' });
-    if (schedule.type === 'interval') {
+    const next = schedule.type === 'once' ? null : nextRunAt(schedule);
+    if (next !== null) {
       await run('DELETE FROM task_steps WHERE task_id = ?', taskId);
       await run(
         `UPDATE tasks SET status = 'queued', checkpoint = NULL, plan = NULL, next_run_at = ?, completed_at = ?,
           heartbeat = NULL, updated_at = ? WHERE id = ?`,
-        now() + schedule.minutes * 60_000,
+        next,
         now(),
         now(),
         taskId,
@@ -510,7 +707,7 @@ export async function executeTask(taskId: string): Promise<void> {
       logActivity({
         level: 'success',
         category: 'task',
-        message: `"${task.title}" finished this round and is scheduled again in ${schedule.minutes} minutes.`,
+        message: `"${task.title}" finished this round; next run ${new Date(next).toLocaleString()}.`,
         taskId,
       });
       broadcast('tasks', { taskId, status: 'queued' });

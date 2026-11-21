@@ -14,7 +14,9 @@ import {
 } from '../memory.ts';
 import { assertPublicUrl, extractTitle, fetchWithTimeout, htmlToText, truncate } from '../util.ts';
 import type { ToolSchema } from '../llm/types.ts';
-import { createTask, executeTask, getTask, listTaskRows } from './tasks.ts';
+import { createTask, executeTask, getTask, listTaskRows, normalizeSchedule } from './tasks.ts';
+import { webSearch, type SearchHit } from '../search.ts';
+import { runResearch } from '../research.ts';
 import {
   createResponsibility,
   listResponsibilities,
@@ -112,69 +114,7 @@ function formatBrowser(result: BrowserResult): string {
 /* Web research                                                        */
 /* ------------------------------------------------------------------ */
 
-interface SearchHit {
-  title: string;
-  url: string;
-  snippet: string;
-}
-
-function decodeDdg(href: string): string {
-  if (href.startsWith('//duckduckgo.com/l/')) {
-    const match = /uddg=([^&]+)/.exec(href);
-    if (match) return decodeURIComponent(match[1]);
-  }
-  if (href.startsWith('/l/')) {
-    const match = /uddg=([^&]+)/.exec(href);
-    if (match) return decodeURIComponent(match[1]);
-  }
-  return href.startsWith('//') ? `https:${href}` : href;
-}
-
-async function duckDuckGo(query: string): Promise<SearchHit[]> {
-  const response = await fetchWithTimeout(
-    `https://html.duckduckgo.com/html/?q=${encodeURIComponent(query)}`,
-    { headers: { 'user-agent': USER_AGENT, accept: 'text/html' } },
-    15_000,
-  );
-  if (!response.ok) throw new Error(`DuckDuckGo responded ${response.status}`);
-  const html = await response.text();
-  const hits: SearchHit[] = [];
-  const linkRe = /<a[^>]+class="[^"]*result__a[^"]*"[^>]*href="([^"]+)"[^>]*>([\s\S]*?)<\/a>/g;
-  const snippetRe = /class="[^"]*result__snippet[^"]*"[^>]*>([\s\S]*?)<\/(?:a|div|td)>/g;
-  const snippets: string[] = [];
-  let snippetMatch: RegExpExecArray | null;
-  while ((snippetMatch = snippetRe.exec(html)) !== null) {
-    snippets.push(htmlToText(snippetMatch[1]).slice(0, 320));
-  }
-  let match: RegExpExecArray | null;
-  while ((match = linkRe.exec(html)) !== null) {
-    const url = decodeDdg(match[1]);
-    if (!/^https?:\/\//.test(url) || url.includes('duckduckgo.com/y.js')) continue;
-    hits.push({
-      title: htmlToText(match[2]).slice(0, 180),
-      url,
-      snippet: snippets[hits.length] ?? '',
-    });
-    if (hits.length >= 8) break;
-  }
-  return hits;
-}
-
-async function wikipedia(query: string): Promise<SearchHit[]> {
-  const url = `https://en.wikipedia.org/w/api.php?action=query&list=search&srsearch=${encodeURIComponent(
-    query,
-  )}&format=json&srlimit=5&origin=*`;
-  const response = await fetchWithTimeout(url, { headers: { 'user-agent': USER_AGENT } }, 12_000);
-  if (!response.ok) throw new Error(`Wikipedia responded ${response.status}`);
-  const data = (await response.json()) as {
-    query?: { search?: { title: string; snippet: string }[] };
-  };
-  return (data.query?.search ?? []).map((hit) => ({
-    title: hit.title,
-    url: `https://en.wikipedia.org/wiki/${encodeURIComponent(hit.title.replace(/ /g, '_'))}`,
-    snippet: htmlToText(hit.snippet).slice(0, 320),
-  }));
-}
+/* Web search lives in ../search.ts so the research pipeline shares it. */
 
 /* ------------------------------------------------------------------ */
 /* Workspace files                                                     */
@@ -243,17 +183,11 @@ export const TOOLS: ToolDef[] = [
       let hits: SearchHit[] = [];
       let engine = 'DuckDuckGo';
       try {
-        hits = await duckDuckGo(query);
-      } catch (error) {
+        const result = await webSearch(query, 8);
+        hits = result.hits;
+        engine = result.engine;
+      } catch {
         hits = [];
-      }
-      if (!hits.length) {
-        try {
-          hits = await wikipedia(query);
-          engine = 'Wikipedia';
-        } catch {
-          hits = [];
-        }
       }
       if (!hits.length) {
         return {
@@ -316,6 +250,54 @@ export const TOOLS: ToolDef[] = [
         untrusted: true,
         content: `${title ? `# ${title}\n` : ''}Source: ${target.toString()}\n\n${truncate(text, Math.min(num(args, 'max_chars', 8000), 20_000))}`,
         summary: `Read ${title || target.hostname}.`,
+      };
+    },
+  },
+  {
+    name: 'research',
+    description:
+      'Run a deep research task on a question: plan sub-questions, search and read several sources, extract claims with quotes, and write a cited report saved as a review packet. Use this instead of a few web_search/fetch_page calls when the answer needs multiple sources, dates or numbers. Returns a short summary plus the packet id.',
+    parameters: {
+      type: 'object',
+      properties: {
+        question: {
+          type: 'string',
+          description: 'The question to research, including any scope, timeframe or constraints.',
+        },
+        depth: {
+          type: 'string',
+          enum: ['quick', 'deep'],
+          description:
+            'quick = 3 sub-questions and up to 8 sources. deep = 5 sub-questions, up to 16 sources and a gap-filling round. Default quick.',
+        },
+        max_sources: { type: 'number', description: 'Optional cap on sources read, 4-24.' },
+      },
+      required: ['question'],
+    },
+    risk: 'low',
+    category: 'research',
+    async run(args, context) {
+      const question = str(args, 'question').trim();
+      if (!question) {
+        return { ok: false, content: 'Give me a research question.', summary: 'Research called without a question.' };
+      }
+      const depth = str(args, 'depth') === 'deep' ? 'deep' : 'quick';
+      const result = await runResearch({
+        question,
+        depth,
+        maxSources: args.max_sources === undefined ? undefined : num(args, 'max_sources', 8),
+        taskId: context.taskId ?? null,
+        conversationId: context.conversationId ?? null,
+      });
+      return {
+        ok: result.ok,
+        content: result.summary,
+        summary: result.ok
+          ? `Researched "${truncate(question, 60)}" (${result.sourceCount} sources, ${result.claimCount} claims).`
+          : 'Research failed.',
+        display: result.deliverableId
+          ? { deliverableId: result.deliverableId, sourceCount: result.sourceCount }
+          : undefined,
       };
     },
   },
@@ -592,7 +574,8 @@ export const TOOLS: ToolDef[] = [
         project_id: { type: 'string', description: 'Optional existing project id.' },
         schedule: {
           type: 'string',
-          description: 'Optional: "once" (default), "daily", "hourly", or "every:30m" / "every:6h".',
+          description:
+            'Optional: "once" (default), "hourly", "daily", "every:30m", or a local time such as "09:00", "weekdays 09:00", "mon,wed,fri 18:00". Add "until 2026-12-31" to stop. Times use the owner timezone.',
         },
       },
       required: ['title', 'objective'],
@@ -606,14 +589,7 @@ export const TOOLS: ToolDef[] = [
       if (getSettings().autonomy.level === 'manual') {
         return { ok: false, content: 'The owner set autonomy to manual; background tasks need their approval.', summary: 'Task creation blocked by autonomy.' };
       }
-      const scheduleRaw = str(args, 'schedule').trim();
-      let schedule: { type: 'once' } | { type: 'interval'; minutes: number } = { type: 'once' };
-      const everyMatch = /^every:(\d+)(m|h)$/.exec(scheduleRaw);
-      if (scheduleRaw === 'daily') schedule = { type: 'interval', minutes: 1440 };
-      else if (scheduleRaw === 'hourly') schedule = { type: 'interval', minutes: 60 };
-      else if (everyMatch) {
-        schedule = { type: 'interval', minutes: Number(everyMatch[1]) * (everyMatch[2] === 'h' ? 60 : 1) };
-      }
+      const schedule = normalizeSchedule(str(args, 'schedule'));
       const task = await createTask({
         title: str(args, 'title') || 'Untitled task',
         objective: str(args, 'objective'),

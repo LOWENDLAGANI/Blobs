@@ -25,12 +25,19 @@ const FILTERS: { key: string; label: string }[] = [
 function scheduleLabel(raw: string | null): string {
   if (!raw) return 'Once';
   try {
-    const parsed = JSON.parse(raw) as { type: string; minutes?: number };
+    const parsed = JSON.parse(raw) as { type: string; minutes?: number; at?: string; days?: number[] };
     if (parsed.type === 'interval' && parsed.minutes) {
       if (parsed.minutes === 1440) return 'Daily';
       if (parsed.minutes === 60) return 'Hourly';
       if (parsed.minutes % 60 === 0) return `Every ${parsed.minutes / 60}h`;
       return `Every ${parsed.minutes}m`;
+    }
+    if (parsed.type === 'clock' && parsed.at) {
+      const names = ['Sun', 'Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat'];
+      const dayLabel = parsed.days?.length
+        ? `${parsed.days.map((day) => names[day] ?? '').filter(Boolean).join(', ')} `
+        : 'Daily ';
+      return `${dayLabel}${parsed.at}`;
     }
   } catch {
     /* fall through */
@@ -297,13 +304,15 @@ function CreateTask({
           ))}
         </Select>
       </Field>
-      <Field label="Schedule">
+      <Field label="Schedule" hint="Clock times use your timezone from Settings.">
         <Select value={schedule} onChange={(event) => setSchedule(event.target.value)}>
           <option value="once">Run once</option>
           <option value="hourly">Every hour</option>
           <option value="every:6h">Every 6 hours</option>
           <option value="every:30m">Every 30 minutes</option>
           <option value="daily">Daily</option>
+          <option value="09:00">Daily at 09:00</option>
+          <option value="weekdays 09:00">Weekdays at 09:00</option>
         </Select>
       </Field>
       <div className="modal-actions">

@@ -263,3 +263,44 @@ create table if not exists notifications (
   link text
 );
 create index if not exists idx_notifications_ts on notifications(ts desc);
+
+-- Deep research: one row per run, the sources it read, and the claims it
+-- extracted with a supporting quote. Excerpts are stored so a citation can be
+-- checked after the page changes or the link dies.
+create table if not exists research_runs (
+  id text primary key,
+  question text not null,
+  depth text not null default 'quick',
+  status text not null default 'running',
+  plan text,
+  deliverable_id text,
+  source_count integer not null default 0,
+  claim_count integer not null default 0,
+  error text,
+  created_at bigint not null,
+  finished_at bigint
+);
+create index if not exists idx_research_runs_created on research_runs(created_at desc);
+
+create table if not exists research_sources (
+  id text primary key,
+  run_id text not null references research_runs(id) on delete cascade,
+  idx integer not null,
+  url text not null,
+  title text not null default '',
+  domain text not null default '',
+  published text not null default '',
+  excerpt text not null default '',
+  retrieved_at bigint not null
+);
+create index if not exists idx_research_sources_run on research_sources(run_id, idx);
+
+create table if not exists research_claims (
+  id text primary key,
+  run_id text not null references research_runs(id) on delete cascade,
+  source_idx integer not null,
+  claim text not null,
+  quote text not null default '',
+  created_at bigint not null
+);
+create index if not exists idx_research_claims_run on research_claims(run_id, source_idx);
