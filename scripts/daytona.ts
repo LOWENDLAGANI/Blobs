@@ -91,6 +91,35 @@ function assertKey(): void {
   }
 }
 
+function readDotEnv(): Record<string, string> {
+  const values: Record<string, string> = {};
+  const file = path.join(ROOT, '.env');
+  if (!fs.existsSync(file)) return values;
+  for (const line of fs.readFileSync(file, 'utf8').split(/\r?\n/)) {
+    const trimmed = line.trim();
+    if (!trimmed || trimmed.startsWith('#')) continue;
+    const eq = trimmed.indexOf('=');
+    if (eq === -1) continue;
+    const key = trimmed.slice(0, eq).trim();
+    let value = trimmed.slice(eq + 1).trim();
+    if (
+      (value.startsWith('"') && value.endsWith('"')) ||
+      (value.startsWith("'") && value.endsWith("'"))
+    ) {
+      value = value.slice(1, -1);
+    }
+    if (key) values[key] = value;
+  }
+  return values;
+}
+
+/** Let hosting credentials live in .env like everything else, without overriding the shell. */
+function loadDotEnv(): void {
+  for (const [key, value] of Object.entries(readDotEnv())) {
+    if (key.startsWith('DAYTONA_') && !(key in process.env)) process.env[key] = value;
+  }
+}
+
 /**
  * Read the local .env so the remote process gets the same provider keys and
  * database settings the developer configured. Only parsed, never uploaded.
@@ -98,23 +127,8 @@ function assertKey(): void {
  */
 function appEnv(): Record<string, string> {
   const env: Record<string, string> = { NODE_ENV: 'production' };
-  const file = path.join(ROOT, '.env');
-  if (fs.existsSync(file)) {
-    for (const line of fs.readFileSync(file, 'utf8').split(/\r?\n/)) {
-      const trimmed = line.trim();
-      if (!trimmed || trimmed.startsWith('#')) continue;
-      const eq = trimmed.indexOf('=');
-      if (eq === -1) continue;
-      const key = trimmed.slice(0, eq).trim();
-      let value = trimmed.slice(eq + 1).trim();
-      if (
-        (value.startsWith('"') && value.endsWith('"')) ||
-        (value.startsWith("'") && value.endsWith("'"))
-      ) {
-        value = value.slice(1, -1);
-      }
-      if (key && key !== 'DAYTONA_API_KEY') env[key] = value;
-    }
+  for (const [key, value] of Object.entries(readDotEnv())) {
+    if (!key.startsWith('DAYTONA_')) env[key] = value;
   }
   // The public URL is the sandbox edge, so the app always listens on this port.
   env.PORT = String(APP_PORT);
@@ -148,6 +162,10 @@ async function keepAwake(sandbox: Sandbox): Promise<void> {
   }
 }
 
+function isAuthError(error: unknown): boolean {
+  return /401|unauthori[sz]ed|invalid.{0,10}(api.{0,10})?key/i.test((error as Error)?.message ?? '');
+}
+
 async function resolveSandbox(daytona: Daytona, create: boolean): Promise<Sandbox | null> {
   const state = readState();
   if (state) {
@@ -156,6 +174,8 @@ async function resolveSandbox(daytona: Daytona, create: boolean): Promise<Sandbo
       await ensureRunning(sandbox);
       return sandbox;
     } catch (error) {
+      // A bad key must not read as "no deployment yet".
+      if (isAuthError(error)) throw error;
       say(`Saved sandbox is gone (${(error as Error).message}).`);
     }
   }
@@ -168,7 +188,8 @@ async function resolveSandbox(daytona: Daytona, create: boolean): Promise<Sandbo
       writeState({ sandboxId: existing.id });
       return existing;
     }
-  } catch {
+  } catch (error) {
+    if (isAuthError(error)) throw error;
     // Search is optional on some deployments; creating is the fallback.
   }
 
@@ -362,6 +383,7 @@ async function main(): Promise<void> {
     throw new Error(`Unknown command "${command}". Use deploy, status, logs, stop, start or destroy.`);
   }
 
+  loadDotEnv();
   assertKey();
   const daytona = new Daytona();
   try {

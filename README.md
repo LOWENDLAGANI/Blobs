@@ -159,7 +159,7 @@ to sleep. That is the piece a free PaaS usually takes away — idle apps are sto
 scheduler or finish a background task.
 
 ```bash
-export DAYTONA_API_KEY=...      # app.daytona.io → Keys
+export DAYTONA_API_KEY=...      # app.daytona.io → Keys (or put it in .env)
 npm run deploy:daytona          # create (or reuse) the sandbox, build, start, print the URL
 
 node scripts/daytona.ts status  # sandbox state and public URL
