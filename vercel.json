@@ -1,0 +1,27 @@
+{
+  "$schema": "https://openapi.vercel.sh/vercel.json",
+  "services": {
+    "blobs": {
+      "root": ".",
+      "entrypoint": "Dockerfile",
+      "runtime": "container"
+    }
+  },
+  "rewrites": [{ "source": "/(.*)", "destination": { "service": "blobs" } }],
+  "daemons": {
+    "scheduler": {
+      "root": ".",
+      "entrypoint": "Dockerfile",
+      "command": ["node", "server/worker.ts"],
+      "instances": { "iad1": 1 },
+      "terminationGracePeriodSeconds": 120,
+      "livenessProbe": {
+        "httpGet": { "port": 8081, "path": "/health" },
+        "initialDelaySeconds": 15,
+        "periodSeconds": 30,
+        "timeoutSeconds": 5,
+        "failureThreshold": 3
+      }
+    }
+  }
+}

@@ -3,7 +3,7 @@ import fs from 'node:fs';
 import Fastify from 'fastify';
 import cookie from '@fastify/cookie';
 import fastifyStatic from '@fastify/static';
-import { HOST, PORT, ROOT, APP_VERSION } from './env.ts';
+import { HOST, PORT, ROOT, APP_VERSION, ROLE } from './env.ts';
 import { ready } from './db.ts';
 import { registerRoutes } from './routes.ts';
 import { startScheduler, stopScheduler } from './agent/scheduler.ts';
@@ -64,7 +64,16 @@ async function boot(): Promise<void> {
       category: 'system',
       message: `BLOBS ${APP_VERSION} online on port ${PORT} (model: ${settings.model.provider}/${settings.model.model}).`,
     });
-    await startScheduler();
+    if (ROLE === 'server') {
+      // Split deployment: the scheduler runs in its own process (server/worker.ts).
+      logActivity({
+        level: 'info',
+        category: 'system',
+        message: 'Scheduler disabled on this process (BLOBS_ROLE=server); the worker process runs it.',
+      });
+    } else {
+      await startScheduler();
+    }
     console.log(`BLOBS listening on http://${HOST}:${PORT} — model ${settings.model.provider}/${settings.model.model}`);
   } catch (error) {
     console.error('Failed to start BLOBS:', error);

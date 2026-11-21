@@ -163,6 +163,34 @@ Hosting note: this needs a process with a persistent disk. It runs on a small VP
 with a volume. It is **not** deployable to Cloudflare Workers/Sites, which cannot run a long-lived Node process. Free 24/7 hosting with a persistent volume is increasingly rare — plan for either a ~$2–5/month instance or a
 machine you own. The app never silently upgrades itself to a paid service.
 
+## Deployment: Vercel (container service + scheduler daemon)
+
+`vercel.json` splits the app into the two shapes Vercel can run:
+
+- **`blobs`** — a container service built from the `Dockerfile`. It serves the UI and the API, SSE included, and scales to
+  zero when idle. It runs with `BLOBS_ROLE=server`, so it never starts the scheduler.
+- **`scheduler`** — a **Vercel Daemon** using the same image with `command: ["node", "server/worker.ts"]`. Daemons stay
+  running, so queued tasks and recurring responsibilities keep executing while nobody is using the app. It runs exactly
+  one instance; two would claim the same tasks.
+
+Set these on the Vercel project, then deploy:
+
+| Variable | Why |
+| --- | --- |
+| `DATABASE_URL` | the Supabase pooled connection string |
+| `SUPABASE_URL`, `SUPABASE_SERVICE_ROLE_KEY` | email sign-in and Storage — required here, because a container has no durable disk |
+| `BLOBS_SECRET` | a stable encryption key instead of `secret.key` on disk |
+
+Notes that matter:
+
+- The image listens on **port 80**, Vercel's default for container services. Every other host must set `PORT`
+  (docker-compose and `render.yaml` already do).
+- **Daemons only run in production** during the beta; a preview deployment serves the UI but does no background work.
+- Each request, including a streamed chat reply, is capped at **300s on Hobby and 800s on Pro**. Long-running work should
+  be a task, which the daemon executes with no request attached.
+- The daemon exposes `/health` on port 8081 for its liveness probe: a long task counts as healthy, a stalled loop does
+  not, and Vercel restarts the instance when checks fail.
+
 ## Deployment: any container host (Docker)
 
 The app is one Node process plus a static build, so a single image runs anywhere — Railway, Render, Fly.io, a VPS, or
@@ -171,6 +199,7 @@ your own machine. `render.yaml` is a ready blueprint and `docker-compose.yml` ru
 ```bash
 docker build -t blobs .
 docker run -p 3000:3000 -v blobs-data:/data \
+  -e PORT=3000 \
   -e DATABASE_URL='postgresql://…pooler.supabase.com:6543/postgres' \
   -e BLOBS_SECRET='a-long-random-string' \
   blobs
@@ -351,6 +380,7 @@ workspace sandbox, the JS sandbox, and that computer tools refuse cleanly when E
 ```
 server/
   index.ts            Fastify bootstrap, static SPA, scheduler start
+  worker.ts           scheduler-only entrypoint for a split deployment (Vercel daemon)
   routes.ts           all HTTP + SSE endpoints
   db.ts               Postgres pool, ?→$n translation, schema bootstrap
   workspace.ts        agent file workspace: Supabase Storage, or disk when unconfigured

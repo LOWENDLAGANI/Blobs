@@ -14,6 +14,12 @@ let timer: NodeJS.Timeout | null = null;
 let ticking = false;
 let lastProactive = 0;
 let lastCleanup = 0;
+let lastTickAt = 0;
+
+/** Liveness signal for the worker process: a wedged loop stops advancing this. */
+export function schedulerHeartbeat(): { running: boolean; ticking: boolean; lastTickAt: number } {
+  return { running: timer !== null, ticking, lastTickAt };
+}
 
 /** Requeue tasks whose process died mid-run instead of restarting them from zero. */
 export async function recoverInterruptedTasks(): Promise<number> {
@@ -126,6 +132,7 @@ async function tick(): Promise<void> {
     logActivity({ level: 'error', category: 'scheduler', message: `Scheduler error: ${(error as Error).message}` });
   } finally {
     ticking = false;
+    lastTickAt = now();
   }
 }
 

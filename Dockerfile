@@ -9,8 +9,10 @@ COPY web ./web
 RUN npm run build
 
 FROM node:24-alpine AS runtime
+# Port 80 is what Vercel routes container traffic to by default; every other
+# host should pass PORT explicitly (docker-compose and render.yaml do).
 ENV NODE_ENV=production \
-    PORT=3000 \
+    PORT=80 \
     HOST=0.0.0.0 \
     DATA_DIR=/data
 WORKDIR /app
@@ -23,5 +25,7 @@ COPY supabase ./supabase
 COPY --from=build /app/web/dist ./web/dist
 RUN mkdir -p /data/workspace /data/tmp
 
-EXPOSE 3000
+EXPOSE 80 3000
+# The Vercel scheduler daemon uses this same image with
+# `command: ["node", "server/worker.ts"]` (see vercel.json).
 CMD ["node", "server/index.ts"]

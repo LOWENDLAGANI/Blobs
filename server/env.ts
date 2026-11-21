@@ -74,6 +74,14 @@ export const WORKSPACE_BUCKET = process.env.WORKSPACE_BUCKET?.trim() || 'blobs-w
 
 export const PORT = Number(process.env.PORT ?? 3000);
 export const HOST = process.env.HOST ?? '0.0.0.0';
+
+/**
+ * What this process does:
+ *   all    — serve HTTP and run the scheduler (default; one process, one host)
+ *   server — serve HTTP only, used by the Vercel container service
+ *   worker — run the scheduler only (server/worker.ts, the Vercel daemon)
+ */
+export const ROLE = (process.env.BLOBS_ROLE ?? 'all').toLowerCase();
 export const SESSION_DAYS = Number(process.env.SESSION_DAYS ?? 30);
 
 for (const dir of [DATA_DIR, WORKSPACE_DIR, TMP_DIR]) {
