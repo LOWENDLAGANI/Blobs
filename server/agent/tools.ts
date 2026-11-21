@@ -8,7 +8,7 @@ import { get } from '../db.ts';
 import { remember, searchMemories, listMemories } from '../memory.ts';
 import { assertPublicUrl, extractTitle, fetchWithTimeout, htmlToText, truncate } from '../util.ts';
 import type { ToolSchema } from '../llm/types.ts';
-import { createTask, listTaskRows } from './tasks.ts';
+import { createTask, executeTask, getTask, listTaskRows } from './tasks.ts';
 import {
   createResponsibility,
   listResponsibilities,
@@ -568,6 +568,56 @@ export const TOOLS: ToolDef[] = [
         content: `Saved review packet ${deliverable.id}: ${deliverable.title}.${link ? ` Public link: ${link}` : ''}`,
         summary: `Delivered "${deliverable.title}".`,
         display: { deliverableId: deliverable.id, url: link || null },
+      };
+    },
+  },
+  {
+    name: 'delegate',
+    description:
+      'Hand a self-contained piece of work to a sub-agent that runs it in its own task with a fresh context and returns its outcome. Use for deep or parallel work; do not delegate what you can finish in one step.',
+    parameters: {
+      type: 'object',
+      properties: {
+        title: { type: 'string', description: 'Short title for the sub-task.' },
+        objective: { type: 'string', description: 'What the sub-agent must deliver. Be specific about the expected output.' },
+        project_id: { type: 'string' },
+      },
+      required: ['objective'],
+    },
+    risk: 'low',
+    category: 'tasks',
+    async run(args, context) {
+      if (context.taskId) {
+        return {
+          ok: false,
+          content: 'A sub-agent cannot spawn another sub-agent.',
+          summary: 'Nested delegation refused.',
+        };
+      }
+      const objective = str(args, 'objective').trim();
+      if (!objective) return { ok: false, content: 'Give the sub-agent an objective.', summary: 'Sub-agent needs an objective.' };
+      const task = await createTask({
+        title: str(args, 'title').trim() || objective.slice(0, 80),
+        objective,
+        projectId: str(args, 'project_id') || null,
+        origin: 'subagent',
+      });
+      await executeTask(task.id);
+      const finished = await getTask(task.id);
+      if (!finished) return { ok: false, content: 'The sub-agent vanished.', summary: 'Sub-agent not found.' };
+      if (finished.status !== 'done') {
+        return {
+          ok: false,
+          content: `Sub-agent did not finish (status: ${finished.status}). ${finished.error ?? ''}`.trim(),
+          summary: 'Sub-agent did not finish.',
+          display: { taskId: task.id },
+        };
+      }
+      return {
+        ok: true,
+        content: `Sub-agent finished: ${finished.title}.\n\nOutcome:\n${finished.result ?? ''}`,
+        summary: `Delegated and completed "${finished.title}".`,
+        display: { taskId: task.id },
       };
     },
   },
