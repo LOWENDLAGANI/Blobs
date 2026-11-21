@@ -32,6 +32,8 @@ export function SettingsPage({ refreshShell }: { refreshShell: () => Promise<voi
   const [busy, setBusy] = useState<string | null>(null);
   const [voices, setVoices] = useState<SpeechSynthesisVoice[]>([]);
   const [passphrase, setPassphrase] = useState({ current: '', next: '' });
+  const [channelSecrets, setChannelSecrets] = useState({ telegram: '', webhook: '' });
+  const [channelResult, setChannelResult] = useState<string | null>(null);
 
   const load = async (): Promise<void> => {
     try {
@@ -55,6 +57,33 @@ export function SettingsPage({ refreshShell }: { refreshShell: () => Promise<voi
     synth.addEventListener('voiceschanged', read);
     return () => synth.removeEventListener('voiceschanged', read);
   }, []);
+
+  const saveChannelSecret = async (key: 'telegram:botToken' | 'webhook:secret', value: string, field: 'telegram' | 'webhook'): Promise<void> => {
+    if (!value.trim()) return toast('Paste the value first.', 'bad');
+    setBusy(key);
+    try {
+      await post('/api/settings/secret', { key, value });
+      setChannelSecrets((current) => ({ ...current, [field]: '' }));
+      toast('Saved encrypted. It is never shown again.', 'good');
+    } catch (error) {
+      toast((error as Error).message, 'bad');
+    } finally {
+      setBusy(null);
+    }
+  };
+
+  const testChannels = async (): Promise<void> => {
+    setBusy('channels');
+    try {
+      const result = await post<{ results: { channel: string; ok: boolean; error?: string }[] }>('/api/notifications/test');
+      if (result.results.length === 0) setChannelResult('No channels enabled yet.');
+      else setChannelResult(result.results.map((item) => `${item.channel}: ${item.ok ? 'sent' : item.error ?? 'failed'}`).join(' · '));
+    } catch (error) {
+      toast((error as Error).message, 'bad');
+    } finally {
+      setBusy(null);
+    }
+  };
 
   const save = async (partial: unknown, label = 'Saved'): Promise<void> => {
     setBusy('save');
@@ -579,9 +608,101 @@ export function SettingsPage({ refreshShell }: { refreshShell: () => Promise<voi
             placeholder="you@example.com"
           />
         </Field>
+        <Field label="Only send out" hint="Filters channels; in-app notifications are always kept.">
+          <Select
+            value={draft.notifications.minLevel}
+            onChange={(event) =>
+              setDraft({
+                ...draft,
+                notifications: { ...draft.notifications, minLevel: event.target.value as 'info' | 'warn' | 'error' },
+              })
+            }
+          >
+            <option value="info">Everything</option>
+            <option value="warn">Warnings and failures</option>
+            <option value="error">Failures only</option>
+          </Select>
+        </Field>
+
+        <p className="section-title" style={{ margin: '8px 0 0' }}>Telegram</p>
+        <Toggle
+          checked={draft.notifications.telegram.enabled}
+          onChange={(value) =>
+            setDraft({ ...draft, notifications: { ...draft.notifications, telegram: { ...draft.notifications.telegram, enabled: value } } })
+          }
+          label="Send notifications to Telegram"
+          hint="Create a bot with @BotFather, then paste its token and your chat id."
+        />
+        <Field label="Chat id" hint="Message the bot once, then use @userinfobot or the getUpdates API to find your id.">
+          <Input
+            value={draft.notifications.telegram.chatId}
+            onChange={(event) =>
+              setDraft({ ...draft, notifications: { ...draft.notifications, telegram: { ...draft.notifications.telegram, chatId: event.target.value } } })
+            }
+            placeholder="123456789"
+          />
+        </Field>
+        <Field label="Bot token" hint="Stored encrypted server-side; it never comes back to this page.">
+          <div className="row">
+            <Input
+              type="password"
+              value={channelSecrets.telegram}
+              onChange={(event) => setChannelSecrets((current) => ({ ...current, telegram: event.target.value }))}
+              placeholder="123456789:AA…"
+            />
+            <Button
+              variant="outline"
+              busy={busy === 'telegram:botToken'}
+              onClick={() => void saveChannelSecret('telegram:botToken', channelSecrets.telegram, 'telegram')}
+            >
+              Save token
+            </Button>
+          </div>
+        </Field>
+
+        <p className="section-title" style={{ margin: '8px 0 0' }}>Webhook</p>
+        <Toggle
+          checked={draft.notifications.webhook.enabled}
+          onChange={(value) =>
+            setDraft({ ...draft, notifications: { ...draft.notifications, webhook: { ...draft.notifications.webhook, enabled: value } } })
+          }
+          label="POST notifications to a webhook"
+          hint="HTTPS endpoint. Requests are JSON and optionally signed with HMAC-SHA256."
+        />
+        <Field label="Webhook URL">
+          <Input
+            value={draft.notifications.webhook.url}
+            onChange={(event) =>
+              setDraft({ ...draft, notifications: { ...draft.notifications, webhook: { ...draft.notifications.webhook, url: event.target.value } } })
+            }
+            placeholder="https://example.com/blobs"
+          />
+        </Field>
+        <Field label="Signing secret (optional)" hint="Sent as x-blobs-signature: sha256=…">
+          <div className="row">
+            <Input
+              type="password"
+              value={channelSecrets.webhook}
+              onChange={(event) => setChannelSecrets((current) => ({ ...current, webhook: event.target.value }))}
+            />
+            <Button
+              variant="outline"
+              busy={busy === 'webhook:secret'}
+              onClick={() => void saveChannelSecret('webhook:secret', channelSecrets.webhook, 'webhook')}
+            >
+              Save secret
+            </Button>
+          </div>
+        </Field>
+
+        {channelResult && <p className="muted small">Test: {channelResult}</p>}
+
         <div className="row">
           <Button busy={busy === 'save'} onClick={() => void save({ notifications: draft.notifications }, 'Notification settings saved.')}>
             Save notifications
+          </Button>
+          <Button variant="outline" busy={busy === 'channels'} onClick={() => void testChannels()}>
+            Send test
           </Button>
           <Button
             variant="outline"

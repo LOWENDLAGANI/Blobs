@@ -311,6 +311,30 @@ async function main(): Promise<void> {
   const revoked = await fetch(`${BASE}${published.data.url}`);
   check('public link can be revoked', revoked.status === 404);
 
+  console.log('\nNotification channels');
+  const channelsOff = await call<{ results: unknown[] }>('POST', '/api/notifications/test');
+  check('channel test is silent when nothing is enabled', channelsOff.status === 200 && channelsOff.data.results.length === 0);
+  const channelSettings = await call('PATCH', '/api/settings', {
+    notifications: {
+      minLevel: 'info',
+      telegram: { enabled: true, chatId: '4242' },
+      webhook: { enabled: true, url: 'http://example.com/hook' },
+    },
+  });
+  check('channel settings saved', channelSettings.status === 200);
+  const channelsOn = await call<{ results: { channel: string; ok: boolean; error?: string }[] }>('POST', '/api/notifications/test');
+  check(
+    'channels report missing credentials instead of sending',
+    channelsOn.status === 200 &&
+      channelsOn.data.results.length === 2 &&
+      channelsOn.data.results.every((item) => !item.ok) &&
+      channelsOn.data.results.some((item) => item.channel === 'telegram' && /token/i.test(item.error ?? '')) &&
+      channelsOn.data.results.some((item) => item.channel === 'webhook' && /https/i.test(item.error ?? '')),
+  );
+  await call('PATCH', '/api/settings', {
+    notifications: { telegram: { enabled: false, chatId: '' }, webhook: { enabled: false, url: '' } },
+  });
+
   console.log('\nEmergency stop');
   await call('POST', '/api/settings/autonomy', { state: 'stopped' });
   const blocked = await chat('Send an email to someone@example.com right now.');

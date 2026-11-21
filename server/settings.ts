@@ -136,6 +136,9 @@ export interface Settings {
     notifyOnTaskComplete: boolean;
     notifyOnApproval: boolean;
     notifyOnError: boolean;
+    minLevel: 'info' | 'warn' | 'error';
+    telegram: { enabled: boolean; chatId: string };
+    webhook: { enabled: boolean; url: string };
   };
   computer: {
     enabled: boolean;
@@ -209,6 +212,9 @@ export const DEFAULT_SETTINGS: Settings = {
     notifyOnTaskComplete: true,
     notifyOnApproval: true,
     notifyOnError: true,
+    minLevel: 'info',
+    telegram: { enabled: false, chatId: '' },
+    webhook: { enabled: false, url: '' },
   },
   computer: {
     enabled: true,

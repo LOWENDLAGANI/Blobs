@@ -1,5 +1,6 @@
 import { all, count, get, run } from './db.ts';
 import { id, now, safeJson } from './util.ts';
+import { dispatchChannels } from './channels.ts';
 
 export type ActivityLevel = 'info' | 'success' | 'warn' | 'error' | 'action';
 
@@ -151,6 +152,8 @@ export function notify(input: NotificationInput): void {
     ),
   );
   broadcast('notification', row);
+  // Best-effort fan-out; the in-app row above is already durable.
+  void dispatchChannels(row).catch((error: Error) => console.warn('[channels]', error.message));
 }
 
 export async function listNotifications(limit = 30): Promise<unknown[]> {

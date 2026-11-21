@@ -49,6 +49,9 @@ export interface AppSettings {
     notifyOnTaskComplete: boolean;
     notifyOnApproval: boolean;
     notifyOnError: boolean;
+    minLevel: 'info' | 'warn' | 'error';
+    telegram: { enabled: boolean; chatId: string };
+    webhook: { enabled: boolean; url: string };
   };
   computer: {
     enabled: boolean;

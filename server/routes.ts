@@ -74,6 +74,7 @@ import {
   runResponsibility,
   updateResponsibility,
 } from './agent/responsibilities.ts';
+import { dispatchChannels } from './channels.ts';
 import {
   createDeliverable,
   deleteDeliverable,
@@ -932,6 +933,25 @@ export async function registerRoutes(app: FastifyInstance): Promise<void> {
     const saved = await saveSettings(request.body ?? {});
     logActivity({ level: 'info', category: 'settings', message: 'Settings updated.' });
     return { ok: true, settings: saved };
+  });
+
+  app.post('/api/settings/secret', async (request, reply) => {
+    const body = (request.body ?? {}) as { key?: string; value?: string };
+    const allowed = new Set(['telegram:botToken', 'webhook:secret']);
+    if (!body.key || !allowed.has(body.key)) return bad(reply, 'Unknown secret.');
+    if (!body.value?.trim()) return bad(reply, 'Paste the value first.');
+    await setSecret(body.key, body.value.trim());
+    return { ok: true };
+  });
+
+  app.post('/api/notifications/test', async () => {
+    const results = await dispatchChannels({
+      title: 'BLOBS test notification',
+      body: 'Channels are wired up. This is what a notification looks like.',
+      level: 'info',
+      ts: now(),
+    });
+    return { ok: true, results };
   });
 
   app.post('/api/settings/provider-key', async (request, reply) => {
