@@ -9,6 +9,12 @@ import { remember, searchMemories, listMemories } from '../memory.ts';
 import { assertPublicUrl, extractTitle, fetchWithTimeout, htmlToText, truncate } from '../util.ts';
 import type { ToolSchema } from '../llm/types.ts';
 import { createTask, listTaskRows } from './tasks.ts';
+import {
+  createResponsibility,
+  listResponsibilities,
+  runResponsibility,
+  updateResponsibility,
+} from './responsibilities.ts';
 import { createProject, updateProject } from './projects.ts';
 import { sendEmail, emailStatus } from '../comms/email.ts';
 import { placeCall, phoneStatus } from '../comms/phone.ts';
@@ -520,6 +526,97 @@ export const TOOLS: ToolDef[] = [
         content: rows.map((task) => `- [${task.status}] ${task.title} (${task.id})`).join('\n'),
         summary: `Listed ${rows.length} tasks.`,
       };
+    },
+  },
+  {
+    name: 'own_responsibility',
+    description:
+      'Take on, adjust, list or run a standing responsibility: an ongoing goal you keep advancing on a cadence, using your own previous outcome to decide the next step. This is how you own work between conversations.',
+    parameters: {
+      type: 'object',
+      properties: {
+        action: { type: 'string', enum: ['create', 'update', 'list', 'run'] },
+        responsibility_id: { type: 'string', description: 'Required for update and run.' },
+        title: { type: 'string' },
+        objective: { type: 'string', description: 'What this responsibility is for.' },
+        cadence_minutes: { type: 'number', description: 'How often to work on it, in minutes. Default 1440 (daily).' },
+        project_id: { type: 'string' },
+        status: { type: 'string', enum: ['active', 'paused', 'done'] },
+      },
+      required: ['action'],
+    },
+    risk: 'low',
+    category: 'tasks',
+    async run(args) {
+      const action = str(args, 'action');
+      if (action === 'list') {
+        const rows = await listResponsibilities();
+        if (!rows.length) {
+          return { ok: true, content: 'You have no standing responsibilities yet.', summary: 'Listed responsibilities: none.' };
+        }
+        return {
+          ok: true,
+          content: rows
+            .map(
+              (row) =>
+                `- [${row.status}] ${row.title} (${row.id}), every ${row.cadence_minutes} min. Last outcome: ${truncate(row.last_outcome ?? 'none yet', 180)}`,
+            )
+            .join('\n'),
+          summary: `Listed ${rows.length} responsibilities.`,
+        };
+      }
+      if (action === 'create') {
+        if (!str(args, 'title') && !str(args, 'objective')) {
+          return { ok: false, content: 'Give the responsibility a title or an objective.', summary: 'Responsibility needs a title.' };
+        }
+        const row = await createResponsibility({
+          title: str(args, 'title') || str(args, 'objective'),
+          objective: str(args, 'objective'),
+          projectId: str(args, 'project_id') || null,
+          cadenceMinutes: num(args, 'cadence_minutes', 1440),
+        });
+        return {
+          ok: true,
+          content: `Took on responsibility ${row.id}: ${row.title}, worked on every ${row.cadence_minutes} minutes.`,
+          summary: `Took on responsibility "${row.title}".`,
+          display: { responsibilityId: row.id },
+        };
+      }
+      const responsibilityId = str(args, 'responsibility_id');
+      if (!responsibilityId) {
+        return { ok: false, content: 'responsibility_id is required for update and run.', summary: 'Missing responsibility id.' };
+      }
+      if (action === 'run') {
+        const result = await runResponsibility(responsibilityId, { force: true });
+        if (!result) {
+          return { ok: false, content: 'That responsibility does not exist or is already running.', summary: 'Responsibility not run.' };
+        }
+        return {
+          ok: true,
+          content: `Ran it and advanced the responsibility. Outcome:\n${result.outcome}`,
+          summary: 'Advanced a responsibility.',
+          display: { taskId: result.taskId },
+        };
+      }
+      if (action === 'update') {
+        const status = str(args, 'status');
+        const updated = await updateResponsibility(responsibilityId, {
+          title: str(args, 'title') || undefined,
+          objective: str(args, 'objective') || undefined,
+          cadenceMinutes: args.cadence_minutes === undefined ? undefined : num(args, 'cadence_minutes', 1440),
+          projectId: args.project_id === undefined ? undefined : str(args, 'project_id') || null,
+          status: status === 'active' || status === 'paused' || status === 'done' ? status : undefined,
+        });
+        if (!updated) {
+          return { ok: false, content: 'No responsibility with that id.', summary: 'Responsibility not found.' };
+        }
+        return {
+          ok: true,
+          content: `Updated ${updated.title}: ${updated.status}, worked on every ${updated.cadence_minutes} minutes.`,
+          summary: 'Updated a responsibility.',
+        };
+      }
+      return { ok: false, content: 'Unknown action. Use create, update, list or run.', summary: 'Unknown responsibility action.' };
     },
   },
   {

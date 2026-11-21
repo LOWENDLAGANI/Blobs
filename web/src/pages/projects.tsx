@@ -2,22 +2,26 @@ import { useCallback, useEffect, useState } from 'react';
 import { api, del, patch, post, timeAgo } from '../api.ts';
 import { useLive } from '../live.ts';
 import { Badge, Button, Card, Empty, Field, Icon, Input, Modal, PageHeader, Select, TextArea, useToast } from '../ui.tsx';
-import type { Project, Task } from '../types.ts';
+import type { Project, Responsibility, Task } from '../types.ts';
 
 export function ProjectsPage() {
   const toast = useToast();
   const [projects, setProjects] = useState<Project[]>([]);
   const [tasks, setTasks] = useState<Task[]>([]);
+  const [responsibilities, setResponsibilities] = useState<Responsibility[]>([]);
   const [editing, setEditing] = useState<Project | 'new' | null>(null);
+  const [editingResponsibility, setEditingResponsibility] = useState<Responsibility | 'new' | null>(null);
 
   const load = useCallback(async () => {
     try {
-      const [projectRows, taskRows] = await Promise.all([
+      const [projectRows, taskRows, responsibilityRows] = await Promise.all([
         api<Project[]>('/api/projects'),
         api<Task[]>('/api/tasks'),
+        api<{ items: Responsibility[] }>('/api/responsibilities'),
       ]);
       setProjects(projectRows);
       setTasks(taskRows);
+      setResponsibilities(responsibilityRows.items);
     } catch (error) {
       toast((error as Error).message, 'bad');
     }
@@ -40,6 +44,26 @@ export function ProjectsPage() {
     await load();
   };
 
+  const runResponsibilityNow = async (responsibility: Responsibility): Promise<void> => {
+    await post(`/api/responsibilities/${responsibility.id}/run`).catch(() => undefined);
+    toast('BLOBS is working on it now.', 'info');
+    await load();
+  };
+
+  const setResponsibilityStatus = async (
+    responsibility: Responsibility,
+    status: Responsibility['status'],
+  ): Promise<void> => {
+    await patch(`/api/responsibilities/${responsibility.id}`, { status }).catch(() => undefined);
+    await load();
+  };
+
+  const removeResponsibility = async (responsibility: Responsibility): Promise<void> => {
+    await del(`/api/responsibilities/${responsibility.id}`).catch(() => undefined);
+    toast('Responsibility dropped. Its task history stays in Tasks.', 'info');
+    await load();
+  };
+
   return (
     <>
       <PageHeader
@@ -51,6 +75,76 @@ export function ProjectsPage() {
           </Button>
         }
       />
+
+      <p className="section-title" style={{ marginTop: 0 }}>Responsibilities</p>
+      <Card className="stack">
+        <div className="row-between">
+          <div>
+            <h3>Standing goals BLOBS owns</h3>
+            <p className="muted tiny">
+              Each one runs on its own cadence: BLOBS reads its previous outcome, decides the next step, does it and
+              reports. No approval prompt, no waiting for you.
+            </p>
+          </div>
+          <Button size="sm" variant="outline" onClick={() => setEditingResponsibility('new')}>
+            <Icon name="plus" size={14} /> Take one on
+          </Button>
+        </div>
+
+        {responsibilities.length === 0 && (
+          <p className="muted small">
+            Nothing owned yet. Add one here, or just ask BLOBS to take responsibility for something.
+          </p>
+        )}
+
+        {responsibilities.map((responsibility) => (
+          <div key={responsibility.id} className="log-line" style={{ alignItems: 'flex-start' }}>
+            <span
+              className={`dot ${responsibility.status === 'active' ? 'live' : responsibility.status === 'done' ? 'success' : 'warn'}`}
+              style={{ marginTop: 7 }}
+            />
+            <div className="log-body">
+              <div className="row" style={{ gap: 8 }}>
+                <strong>{responsibility.title}</strong>
+                <Badge tone={responsibility.status === 'active' ? 'good' : responsibility.status === 'done' ? 'info' : 'warn'}>
+                  {responsibility.status}
+                </Badge>
+                <span className="muted tiny">every {cadenceLabel(responsibility.cadence_minutes)}</span>
+                {responsibility.status === 'active' && responsibility.next_run_at && (
+                  <span className="muted tiny">next {new Date(responsibility.next_run_at).toLocaleString()}</span>
+                )}
+                {responsibility.run_count > 0 && <span className="muted tiny">{responsibility.run_count} runs</span>}
+              </div>
+              {responsibility.objective && <p className="muted small">{responsibility.objective}</p>}
+              {responsibility.last_outcome && (
+                <p className="small" style={{ whiteSpace: 'pre-wrap', marginTop: 6 }}>
+                  {responsibility.last_outcome}
+                </p>
+              )}
+              <div className="row" style={{ gap: 6, marginTop: 6 }}>
+                <Button size="sm" variant="outline" onClick={() => void runResponsibilityNow(responsibility)}>
+                  Run now
+                </Button>
+                <Button
+                  size="sm"
+                  variant="quiet"
+                  onClick={() =>
+                    void setResponsibilityStatus(responsibility, responsibility.status === 'active' ? 'paused' : 'active')
+                  }
+                >
+                  {responsibility.status === 'active' ? 'Pause' : 'Resume'}
+                </Button>
+                <Button size="sm" variant="quiet" onClick={() => setEditingResponsibility(responsibility)}>
+                  Edit
+                </Button>
+                <Button size="sm" variant="quiet" onClick={() => void removeResponsibility(responsibility)}>
+                  Drop
+                </Button>
+              </div>
+            </div>
+          </div>
+        ))}
+      </Card>
 
       {projects.length === 0 ? (
         <Card>
@@ -138,6 +232,18 @@ export function ProjectsPage() {
         </div>
       )}
 
+      {editingResponsibility && (
+        <ResponsibilityEditor
+          responsibility={editingResponsibility === 'new' ? null : editingResponsibility}
+          projects={projects}
+          onClose={() => setEditingResponsibility(null)}
+          onSaved={async () => {
+            setEditingResponsibility(null);
+            await load();
+          }}
+        />
+      )}
+
       {editing && (
         <ProjectEditor
           project={editing === 'new' ? null : editing}
@@ -149,6 +255,94 @@ export function ProjectsPage() {
         />
       )}
     </>
+  );
+}
+
+function cadenceLabel(minutes: number): string {
+  if (minutes % 1440 === 0) return minutes === 1440 ? 'day' : `${minutes / 1440} days`;
+  if (minutes % 60 === 0) return `${minutes / 60}h`;
+  return `${minutes}m`;
+}
+
+function ResponsibilityEditor({
+  responsibility,
+  projects,
+  onClose,
+  onSaved,
+}: {
+  responsibility: Responsibility | null;
+  projects: Project[];
+  onClose: () => void;
+  onSaved: () => Promise<void>;
+}) {
+  const toast = useToast();
+  const [title, setTitle] = useState(responsibility?.title ?? '');
+  const [objective, setObjective] = useState(responsibility?.objective ?? '');
+  const [cadence, setCadence] = useState(String(responsibility?.cadence_minutes ?? 1440));
+  const [projectId, setProjectId] = useState(responsibility?.project_id ?? '');
+  const [busy, setBusy] = useState(false);
+
+  const save = async (): Promise<void> => {
+    if (!title.trim() && !objective.trim()) return toast('Give it a title or an objective.', 'bad');
+    const cadenceMinutes = Math.max(1, Number(cadence) || 1440);
+    setBusy(true);
+    try {
+      if (responsibility) {
+        await patch(`/api/responsibilities/${responsibility.id}`, {
+          title,
+          objective,
+          cadenceMinutes,
+          projectId: projectId || null,
+        });
+        toast('Responsibility updated.', 'good');
+      } else {
+        await post('/api/responsibilities', { title, objective, cadenceMinutes, projectId: projectId || null });
+        toast('BLOBS took it on. The first run is scheduled.', 'good');
+      }
+      await onSaved();
+    } catch (error) {
+      toast((error as Error).message, 'bad');
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  return (
+    <Modal title={responsibility ? 'Edit responsibility' : 'Take on a responsibility'} onClose={onClose} wide>
+      <p className="note" style={{ marginBottom: 12 }}>
+        BLOBS will work on this on its own and read its last outcome before each run, so it keeps moving instead of
+        repeating itself. Nothing is held for approval.
+      </p>
+      <Field label="Title">
+        <Input value={title} onChange={(event) => setTitle(event.target.value)} placeholder="Keep the launch on track" autoFocus />
+      </Field>
+      <Field label="Standing objective" hint="What should it keep advancing? Constraints and what good looks like.">
+        <TextArea value={objective} onChange={(event) => setObjective(event.target.value)} rows={4} />
+      </Field>
+      <div className="grid-2">
+        <Field label="Cadence (minutes)" hint="1440 = once a day. Minimum 1.">
+          <Input value={cadence} onChange={(event) => setCadence(event.target.value)} inputMode="numeric" />
+        </Field>
+        <Field label="Project (optional)">
+          <Select value={projectId} onChange={(event) => setProjectId(event.target.value)}>
+            <option value="">None</option>
+            {projects.map((project) => (
+              <option key={project.id} value={project.id}>
+                {project.title}
+              </option>
+            ))}
+          </Select>
+        </Field>
+      </div>
+      <div className="modal-actions">
+        <Button variant="quiet" onClick={onClose}>
+          Cancel
+        </Button>
+        <Button busy={busy} onClick={() => void save()}>
+          {responsibility ? 'Save changes' : 'Take it on'}
+        </Button>
+      </div>
+    </Modal>
   );
 }
 

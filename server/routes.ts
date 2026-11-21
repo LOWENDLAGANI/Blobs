@@ -67,6 +67,13 @@ import {
 } from './agent/tasks.ts';
 import { executeApprovedTool } from './agent/core.ts';
 import { createProject, deleteProject, listProjects, updateProject } from './agent/projects.ts';
+import {
+  createResponsibility,
+  deleteResponsibility,
+  listResponsibilities,
+  runResponsibility,
+  updateResponsibility,
+} from './agent/responsibilities.ts';
 import { schedulerState } from './agent/scheduler.ts';
 import { toolCatalog } from './agent/tools.ts';
 import { decideApproval, listApprovals, parseApprovalPayload } from './approvals.ts';
@@ -541,6 +548,57 @@ export async function registerRoutes(app: FastifyInstance): Promise<void> {
   });
 
   app.get('/api/inbox', async () => await fetchInbox(15));
+
+  /* ---------------- responsibilities ---------------- */
+
+  app.get('/api/responsibilities', async () => ({ items: await listResponsibilities() }));
+
+  app.post('/api/responsibilities', async (request, reply) => {
+    const body = (request.body ?? {}) as {
+      title?: string;
+      objective?: string;
+      projectId?: string | null;
+      cadenceMinutes?: number;
+    };
+    if (!body.title?.trim() && !body.objective?.trim()) {
+      return bad(reply, 'Give the responsibility a title or an objective.');
+    }
+    const responsibility = await createResponsibility({
+      title: body.title ?? body.objective ?? 'Untitled responsibility',
+      objective: body.objective ?? '',
+      projectId: body.projectId ?? null,
+      cadenceMinutes: body.cadenceMinutes,
+    });
+    return { ok: true, responsibility };
+  });
+
+  app.patch('/api/responsibilities/:id', async (request, reply) => {
+    const { id } = request.params as { id: string };
+    const body = (request.body ?? {}) as Record<string, unknown>;
+    const status = body.status;
+    const updated = await updateResponsibility(id, {
+      title: typeof body.title === 'string' ? body.title : undefined,
+      objective: typeof body.objective === 'string' ? body.objective : undefined,
+      status: status === 'active' || status === 'paused' || status === 'done' ? status : undefined,
+      cadenceMinutes: body.cadenceMinutes === undefined ? undefined : Number(body.cadenceMinutes),
+      projectId: body.projectId === undefined ? undefined : (body.projectId as string | null),
+    });
+    if (!updated) return bad(reply, 'Responsibility not found.', 404);
+    return { ok: true, responsibility: updated };
+  });
+
+  app.post('/api/responsibilities/:id/run', async (request) => {
+    const { id } = request.params as { id: string };
+    void runResponsibility(id, { force: true }).catch((error: Error) =>
+      logActivity({ level: 'error', category: 'responsibility', message: error.message }),
+    );
+    return { ok: true, started: true };
+  });
+
+  app.delete('/api/responsibilities/:id', async (request) => {
+    const { id } = request.params as { id: string };
+    return { ok: await deleteResponsibility(id) };
+  });
 
   /* ---------------- integrations ---------------- */
 

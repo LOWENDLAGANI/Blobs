@@ -280,6 +280,18 @@ async function main(): Promise<void> {
   const pending = await call<{ items: unknown[] }>('GET', '/api/approvals');
   check('nothing is queued for manual approval', pending.data.items.length === 0, JSON.stringify(pending.data.items));
 
+  console.log('\nResponsibilities');
+  const resp = await call<{ responsibility: { id: string } }>('POST', '/api/responsibilities', {
+    title: 'Keep the project moving',
+    objective: 'Review the project and take the next useful step.',
+    cadenceMinutes: 1440,
+  });
+  check('responsibility created', resp.status === 200 && Boolean(resp.data.responsibility.id));
+  const respList = await call<{ items: { status: string }[] }>('GET', '/api/responsibilities');
+  check('responsibility listed', respList.data.items.length === 1);
+  const respPaused = await call('PATCH', `/api/responsibilities/${resp.data.responsibility.id}`, { status: 'paused' });
+  check('responsibility paused', respPaused.status === 200);
+
   console.log('\nEmergency stop');
   await call('POST', '/api/settings/autonomy', { state: 'stopped' });
   const blocked = await chat('Send an email to someone@example.com right now.');

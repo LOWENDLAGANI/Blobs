@@ -114,6 +114,22 @@ export interface Project {
   open_tasks?: number;
 }
 
+export interface Responsibility {
+  id: string;
+  project_id: string | null;
+  title: string;
+  objective: string;
+  cadence_minutes: number;
+  status: 'active' | 'paused' | 'done';
+  last_run_at: number | null;
+  next_run_at: number | null;
+  last_outcome: string | null;
+  last_task_id: string | null;
+  run_count: number;
+  created_at: number;
+  updated_at: number;
+}
+
 export interface MemoryItem {
   id: string;
   kind: string;

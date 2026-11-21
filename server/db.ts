@@ -164,6 +164,23 @@ CREATE TABLE IF NOT EXISTS task_steps (
 );
 CREATE INDEX IF NOT EXISTS idx_task_steps_task ON task_steps(task_id, idx);
 
+CREATE TABLE IF NOT EXISTS responsibilities (
+  id TEXT PRIMARY KEY,
+  project_id TEXT REFERENCES projects(id) ON DELETE SET NULL,
+  title TEXT NOT NULL,
+  objective TEXT NOT NULL DEFAULT '',
+  cadence_minutes INTEGER NOT NULL DEFAULT 1440,
+  status TEXT NOT NULL DEFAULT 'active',
+  last_run_at INTEGER,
+  next_run_at INTEGER,
+  last_outcome TEXT,
+  last_task_id TEXT,
+  run_count INTEGER NOT NULL DEFAULT 0,
+  created_at INTEGER NOT NULL,
+  updated_at INTEGER NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_responsibilities_due ON responsibilities(status, next_run_at);
+
 CREATE TABLE IF NOT EXISTS approvals (
   id TEXT PRIMARY KEY,
   kind TEXT NOT NULL,

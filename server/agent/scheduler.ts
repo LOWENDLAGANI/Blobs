@@ -4,6 +4,7 @@ import { logActivity, notify } from '../activity.ts';
 import { complete } from '../llm/index.ts';
 import { now, truncate } from '../util.ts';
 import { executeTask, isTaskRunning } from './tasks.ts';
+import { runDueResponsibilities } from './responsibilities.ts';
 
 const TICK_MS = 8_000;
 const STALE_HEARTBEAT_MS = 120_000;
@@ -115,6 +116,10 @@ async function tick(): Promise<void> {
       if (isTaskRunning(row.id)) continue;
       await executeTask(row.id);
     }
+
+    // Standing responsibilities are the agent's own work: it decides the next
+    // step from the last outcome instead of waiting to be asked.
+    await runDueResponsibilities(1);
 
     await proactiveCheck();
   } catch (error) {
