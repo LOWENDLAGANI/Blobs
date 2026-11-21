@@ -17,8 +17,8 @@ export interface EmailConfig {
   username: string;
 }
 
-export function emailConfig(): EmailConfig | null {
-  const row = get<{ config: string }>("SELECT config FROM integrations WHERE key = 'email'");
+export async function emailConfig(): Promise<EmailConfig | null> {
+  const row = await get<{ config: string }>("SELECT config FROM integrations WHERE key = 'email'");
   if (!row?.config) return null;
   const parsed = safeJson<Partial<EmailConfig>>(row.config, {});
   if (!parsed.address || !parsed.smtpHost || !parsed.username) return null;
@@ -34,9 +34,9 @@ export function emailConfig(): EmailConfig | null {
   };
 }
 
-export function emailStatus(): { ready: boolean; address: string | null; detail: string } {
-  const config = emailConfig();
-  const password = getSecret('email:password');
+export async function emailStatus(): Promise<{ ready: boolean; address: string | null; detail: string }> {
+  const config = await emailConfig();
+  const password = await getSecret('email:password');
   if (!config) {
     return {
       ready: false,
@@ -50,8 +50,8 @@ export function emailStatus(): { ready: boolean; address: string | null; detail:
   return { ready: true, address: config.address, detail: `Sending as ${config.displayName} <${config.address}>.` };
 }
 
-function transport(config: EmailConfig) {
-  const password = getSecret('email:password');
+async function transport(config: EmailConfig) {
+  const password = await getSecret('email:password');
   if (!password) throw new Error('The email password is not stored.');
   return nodemailer.createTransport({
     host: config.smtpHost,
@@ -70,7 +70,7 @@ export async function sendEmail(input: {
   body: string;
   context?: ToolContext;
 }): Promise<{ ok: boolean; error?: string; messageId?: string }> {
-  const config = emailConfig();
+  const config = await emailConfig();
   if (!config) return { ok: false, error: 'Email is not connected.' };
   const to = input.to.trim();
   if (!/^[^@\s]+@[^@\s]+\.[^@\s]+$/.test(to)) return { ok: false, error: 'That recipient address does not look valid.' };
@@ -81,13 +81,13 @@ export async function sendEmail(input: {
     : `${input.body}${signature}`;
 
   try {
-    const info = await transport(config).sendMail({
+    const info = await (await transport(config)).sendMail({
       from: { name: config.displayName, address: config.address },
       to,
       subject: input.subject.slice(0, 200),
       text,
     });
-    run(
+    await run(
       `INSERT INTO comms_events(id, channel, direction, peer, subject, body, status, external_id, meta, created_at)
        VALUES (?, 'email', 'outbound', ?, ?, ?, 'sent', ?, ?, ?)`,
       id('cm'),
@@ -108,7 +108,7 @@ export async function sendEmail(input: {
     return { ok: true, messageId: info.messageId };
   } catch (error) {
     const message = (error as Error).message;
-    run(
+    await run(
       `INSERT INTO comms_events(id, channel, direction, peer, subject, body, status, external_id, meta, created_at)
        VALUES (?, 'email', 'outbound', ?, ?, ?, 'failed', NULL, ?, ?)`,
       id('cm'),
@@ -133,8 +133,8 @@ export interface InboxMessage {
 
 /** Read recent inbox headers. Never marks messages as read. */
 export async function fetchInbox(limit = 15): Promise<{ ok: boolean; messages: InboxMessage[]; error?: string }> {
-  const config = emailConfig();
-  const password = getSecret('email:password');
+  const config = await emailConfig();
+  const password = await getSecret('email:password');
   if (!config || !password) return { ok: false, messages: [], error: 'Email is not connected.' };
 
   const client = new ImapFlow({
@@ -173,7 +173,7 @@ export async function fetchInbox(limit = 15): Promise<{ ok: boolean; messages: I
       lock.release();
     }
     messages.reverse();
-    run(
+    await run(
       `INSERT INTO comms_events(id, channel, direction, peer, subject, body, status, external_id, meta, created_at)
        VALUES (?, 'email', 'inbound', ?, ?, ?, 'synced', NULL, ?, ?)`,
       id('cm'),
@@ -191,8 +191,8 @@ export async function fetchInbox(limit = 15): Promise<{ ok: boolean; messages: I
   }
 }
 
-export function saveEmailConfig(config: EmailConfig): void {
-  run(
+export async function saveEmailConfig(config: EmailConfig): Promise<void> {
+  await run(
     `INSERT INTO integrations(key, status, config, updated_at) VALUES ('email', 'connected', ?, ?)
      ON CONFLICT(key) DO UPDATE SET status = 'connected', config = excluded.config, updated_at = excluded.updated_at`,
     JSON.stringify(config),
@@ -201,14 +201,14 @@ export function saveEmailConfig(config: EmailConfig): void {
   logActivity({ level: 'info', category: 'integration', message: `Connected email as ${config.address}.` });
 }
 
-export function disconnectEmail(): void {
-  run("UPDATE integrations SET status = 'disconnected', updated_at = ? WHERE key = 'email'", now());
-  run("DELETE FROM secrets WHERE key = 'email:password'");
+export async function disconnectEmail(): Promise<void> {
+  await run("UPDATE integrations SET status = 'disconnected', updated_at = ? WHERE key = 'email'", now());
+  await run("DELETE FROM secrets WHERE key = 'email:password'");
   logActivity({ level: 'warn', category: 'integration', message: 'Disconnected email.' });
 }
 
-export function emailHistory(limit = 40): unknown[] {
-  return all(
+export async function emailHistory(limit = 40): Promise<unknown[]> {
+  return await all(
     "SELECT * FROM comms_events WHERE channel = 'email' ORDER BY created_at DESC LIMIT ?",
     Math.min(limit, 200),
   );

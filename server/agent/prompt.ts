@@ -31,13 +31,13 @@ export interface PromptOptions {
   query?: string;
 }
 
-function activeWork(): string {
-  const tasks = all<{ title: string; status: string; objective: string }>(
+async function activeWork(): Promise<string> {
+  const tasks = await all<{ title: string; status: string; objective: string }>(
     `SELECT title, status, objective FROM tasks
      WHERE status IN ('running', 'queued', 'waiting_approval', 'paused')
      ORDER BY updated_at DESC LIMIT 6`,
   );
-  const projects = all<{ title: string; objective: string; status: string }>(
+  const projects = await all<{ title: string; objective: string; status: string }>(
     `SELECT title, objective, status FROM projects WHERE status = 'active' ORDER BY updated_at DESC LIMIT 5`,
   );
   const parts: string[] = [];
@@ -50,7 +50,7 @@ function activeWork(): string {
   return parts.join('\n\n');
 }
 
-export function buildSystemPrompt(settings: Settings = getSettings(), options: PromptOptions = {}): string {
+export async function buildSystemPrompt(settings: Settings = getSettings(), options: PromptOptions = {}): Promise<string> {
   const voice = options.voice ?? false;
   const now = new Date();
   const local = new Intl.DateTimeFormat('en-GB', {
@@ -59,9 +59,9 @@ export function buildSystemPrompt(settings: Settings = getSettings(), options: P
     timeStyle: 'short',
   }).format(now);
 
-  const memories = memoryContext(options.query ?? options.extraContext ?? '', settings.memory.maxInjected);
-  const work = activeWork();
-  const owner = get<{ name: string }>('SELECT name FROM owner WHERE id = 1');
+  const memories = await memoryContext(options.query ?? options.extraContext ?? '', settings.memory.maxInjected);
+  const work = await activeWork();
+  const owner = await get<{ name: string }>('SELECT name FROM owner WHERE id = 1');
 
   const sections: string[] = [];
 

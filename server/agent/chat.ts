@@ -44,9 +44,9 @@ export type TurnEvent =
 
 const HISTORY_LIMIT = 60;
 
-export function ensureConversation(conversationId?: string | null, channel = 'web'): ConversationRow {
+export async function ensureConversation(conversationId?: string | null, channel = 'web'): Promise<ConversationRow> {
   if (conversationId) {
-    const existing = get<ConversationRow>('SELECT * FROM conversations WHERE id = ?', conversationId);
+    const existing = await get<ConversationRow>('SELECT * FROM conversations WHERE id = ?', conversationId);
     if (existing) return existing;
   }
   const ts = now();
@@ -60,7 +60,7 @@ export function ensureConversation(conversationId?: string | null, channel = 'we
     archived: 0,
     meta: null,
   };
-  run(
+  await run(
     `INSERT INTO conversations(id, channel, title, summary, created_at, updated_at, archived, meta)
      VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
     row.id,
@@ -75,7 +75,7 @@ export function ensureConversation(conversationId?: string | null, channel = 'we
   return row;
 }
 
-export function addMessage(input: {
+export async function addMessage(input: {
   conversationId: string;
   role: MessageRow['role'];
   content: string;
@@ -84,7 +84,7 @@ export function addMessage(input: {
   toolName?: string | null;
   untrusted?: boolean;
   model?: string | null;
-}): MessageRow {
+}): Promise<MessageRow> {
   const row: MessageRow = {
     id: id('msg'),
     conversation_id: input.conversationId,
@@ -97,7 +97,7 @@ export function addMessage(input: {
     model: input.model ?? null,
     created_at: now(),
   };
-  run(
+  await run(
     `INSERT INTO messages(id, conversation_id, role, content, tool_calls, tool_call_id, tool_name, untrusted, model, created_at)
      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
     row.id,
@@ -111,12 +111,14 @@ export function addMessage(input: {
     row.model,
     row.created_at,
   );
-  run('UPDATE conversations SET updated_at = ? WHERE id = ?', row.created_at, row.conversation_id);
+  await run('UPDATE conversations SET updated_at = ? WHERE id = ?', row.created_at, row.conversation_id);
   return row;
 }
 
-export function listConversations(limit = 40): (ConversationRow & { message_count: number; last_message: string | null })[] {
-  return all<ConversationRow & { message_count: number; last_message: string | null }>(
+export async function listConversations(
+  limit = 40,
+): Promise<(ConversationRow & { message_count: number; last_message: string | null })[]> {
+  return await all<ConversationRow & { message_count: number; last_message: string | null }>(
     `SELECT c.*,
             (SELECT COUNT(*) FROM messages m WHERE m.conversation_id = c.id) AS message_count,
             (SELECT content FROM messages m WHERE m.conversation_id = c.id ORDER BY created_at DESC LIMIT 1) AS last_message
@@ -125,10 +127,12 @@ export function listConversations(limit = 40): (ConversationRow & { message_coun
   );
 }
 
-export function getConversation(conversationId: string): { conversation: ConversationRow; messages: MessageRow[] } | null {
-  const conversation = get<ConversationRow>('SELECT * FROM conversations WHERE id = ?', conversationId);
+export async function getConversation(
+  conversationId: string,
+): Promise<{ conversation: ConversationRow; messages: MessageRow[] } | null> {
+  const conversation = await get<ConversationRow>('SELECT * FROM conversations WHERE id = ?', conversationId);
   if (!conversation) return null;
-  const messages = all<MessageRow>(
+  const messages = await all<MessageRow>(
     'SELECT * FROM messages WHERE conversation_id = ? ORDER BY created_at ASC LIMIT 400',
     conversationId,
   );
@@ -175,16 +179,16 @@ export async function* runTurn(input: {
 }): AsyncGenerator<TurnEvent> {
   const settings = getSettings();
   const channel = input.channel ?? 'web';
-  const conversation = ensureConversation(input.conversationId, channel);
+  const conversation = await ensureConversation(input.conversationId, channel);
   const userText = input.text.trim().slice(0, 20_000);
   if (!userText) {
     yield { type: 'error', message: 'Nothing was said.' };
     return;
   }
 
-  const userMessage = addMessage({ conversationId: conversation.id, role: 'user', content: userText });
+  const userMessage = await addMessage({ conversationId: conversation.id, role: 'user', content: userText });
   if (!conversation.title) {
-    run('UPDATE conversations SET title = ? WHERE id = ?', autoTitle(userText), conversation.id);
+    await run('UPDATE conversations SET title = ? WHERE id = ?', autoTitle(userText), conversation.id);
     conversation.title = autoTitle(userText);
   }
 
@@ -196,13 +200,13 @@ export async function* runTurn(input: {
     channel: conversation.channel,
   };
 
-  const history = all<MessageRow>(
+  const history = (await all<MessageRow>(
     'SELECT * FROM messages WHERE conversation_id = ? ORDER BY created_at DESC LIMIT ?',
     conversation.id,
     HISTORY_LIMIT,
-  ).reverse();
+  )).reverse();
 
-  const system = buildSystemPrompt(settings, {
+  const system = await buildSystemPrompt(settings, {
     voice: input.voice,
     query: userText,
     extraContext: conversation.summary ? `Earlier in this conversation: ${conversation.summary}` : '',
@@ -245,7 +249,7 @@ export async function* runTurn(input: {
   }
 
   if (finalText.trim()) {
-    const saved = addMessage({
+    const saved = await addMessage({
       conversationId: conversation.id,
       role: 'assistant',
       content: finalText,
@@ -275,7 +279,8 @@ export async function* runTurn(input: {
 
   if (settings.memory.autoSummarize) {
     const total = Number(
-      (get<{ n: number }>('SELECT COUNT(*) AS n FROM messages WHERE conversation_id = ?', conversation.id)?.n ?? 0),
+      ((await get<{ n: number }>('SELECT COUNT(*) AS n FROM messages WHERE conversation_id = ?', conversation.id))?.n ??
+        0),
     );
     if (total > 0 && total % 12 === 0) {
       void summariseConversation(conversation.id).catch(() => undefined);
@@ -313,7 +318,7 @@ export async function continueAfterApproval(
     toolNote = result.ok
       ? `The owner approved ${payload.tool}. Result: ${result.content}`
       : `The owner approved ${payload.tool}, but it failed: ${result.content}`;
-    addMessage({
+    await addMessage({
       conversationId,
       role: 'tool',
       content: truncate(toolNote, 8000),
@@ -323,7 +328,7 @@ export async function continueAfterApproval(
     });
   } else {
     toolNote = `The owner rejected ${approval.title}. Do not retry this action; acknowledge it briefly.`;
-    addMessage({
+    await addMessage({
       conversationId,
       role: 'tool',
       content: toolNote,
@@ -332,16 +337,16 @@ export async function continueAfterApproval(
     });
   }
 
-  const conversation = get<ConversationRow>('SELECT * FROM conversations WHERE id = ?', conversationId);
+  const conversation = await get<ConversationRow>('SELECT * FROM conversations WHERE id = ?', conversationId);
   if (!conversation) return;
 
-  const history = all<MessageRow>(
+  const history = (await all<MessageRow>(
     'SELECT * FROM messages WHERE conversation_id = ? ORDER BY created_at DESC LIMIT ?',
     conversationId,
     HISTORY_LIMIT,
-  ).reverse();
+  )).reverse();
 
-  const system = buildSystemPrompt(settings, {
+  const system = await buildSystemPrompt(settings, {
     channel: 'web',
     extraContext: `An approval decision just happened. ${toolNote}`,
   });
@@ -366,7 +371,7 @@ export async function continueAfterApproval(
   }
 
   if (text.trim()) {
-    addMessage({ conversationId, role: 'assistant', content: text, model: settings.model.model });
+    await addMessage({ conversationId, role: 'assistant', content: text, model: settings.model.model });
   }
   broadcast('chat', { conversationId, event: { type: 'done', conversationId, interrupted: false } });
   broadcast('conversation', { conversationId });
@@ -377,11 +382,11 @@ export async function continueAfterApproval(
 /* ------------------------------------------------------------------ */
 
 export async function summariseConversation(conversationId: string): Promise<void> {
-  const rows = all<MessageRow>(
+  const rows = (await all<MessageRow>(
     `SELECT * FROM messages WHERE conversation_id = ? AND role IN ('user','assistant')
      ORDER BY created_at DESC LIMIT 24`,
     conversationId,
-  ).reverse();
+  )).reverse();
   if (rows.length < 6) return;
 
   const transcript = rows
@@ -396,8 +401,8 @@ export async function summariseConversation(conversationId: string): Promise<voi
 
   if (!summary || /^none$/i.test(summary.trim())) return;
 
-  run('UPDATE conversations SET summary = ? WHERE id = ?', truncate(summary, 2000), conversationId);
-  remember({
+  await run('UPDATE conversations SET summary = ? WHERE id = ?', truncate(summary, 2000), conversationId);
+  await remember({
     content: `Conversation summary (${new Date().toISOString().slice(0, 10)}): ${summary}`,
     kind: 'summary',
     tags: ['conversation'],
@@ -409,7 +414,7 @@ export async function summariseConversation(conversationId: string): Promise<voi
 /** Queue an objective straight from the UI (Tasks page). */
 export async function startTaskFromChat(conversationId: string, objective: string): Promise<void> {
   const { createTask } = await import('./tasks.ts');
-  createTask({ title: objective.slice(0, 70), objective, schedule: normalizeSchedule('once'), origin: 'owner' });
+  await createTask({ title: objective.slice(0, 70), objective, schedule: normalizeSchedule('once'), origin: 'owner' });
   broadcast('tasks', { conversationId });
   notify({ title: 'Task queued', body: truncate(objective, 160), level: 'info', link: '/tasks' });
 }

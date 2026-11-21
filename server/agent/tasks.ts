@@ -79,7 +79,7 @@ export function normalizeSchedule(raw: unknown): TaskSchedule {
   return { type: 'once' };
 }
 
-export function createTask(input: {
+export async function createTask(input: {
   title: string;
   objective: string;
   projectId?: string | null;
@@ -87,7 +87,7 @@ export function createTask(input: {
   origin?: string;
   autonomy?: string;
   runAt?: number | null;
-}): TaskRow {
+}): Promise<TaskRow> {
   const ts = now();
   const schedule = input.schedule ?? { type: 'once' };
   const row: TaskRow = {
@@ -112,7 +112,7 @@ export function createTask(input: {
     updated_at: ts,
     completed_at: null,
   };
-  run(
+  await run(
     `INSERT INTO tasks(id, project_id, title, objective, status, autonomy, schedule, next_run_at, last_run_at,
       heartbeat, attempts, max_attempts, plan, checkpoint, result, error, origin, created_at, updated_at, completed_at)
      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
@@ -148,32 +148,34 @@ export function createTask(input: {
   return row;
 }
 
-export function listTaskRows(status?: string): TaskRow[] {
+export async function listTaskRows(status?: string): Promise<TaskRow[]> {
   if (status && status !== 'all') {
-    return all<TaskRow>('SELECT * FROM tasks WHERE status = ? ORDER BY created_at DESC LIMIT 200', status);
+    return await all<TaskRow>('SELECT * FROM tasks WHERE status = ? ORDER BY created_at DESC LIMIT 200', status);
   }
-  return all<TaskRow>('SELECT * FROM tasks ORDER BY created_at DESC LIMIT 200');
+  return await all<TaskRow>('SELECT * FROM tasks ORDER BY created_at DESC LIMIT 200');
 }
 
-export function getTask(taskId: string): TaskRow | null {
-  return get<TaskRow>('SELECT * FROM tasks WHERE id = ?', taskId);
+export async function getTask(taskId: string): Promise<TaskRow | null> {
+  return await get<TaskRow>('SELECT * FROM tasks WHERE id = ?', taskId);
 }
 
-export function taskDetail(taskId: string): { task: TaskRow; steps: TaskStep[] } | null {
-  const task = getTask(taskId);
+export async function taskDetail(
+  taskId: string,
+): Promise<{ task: TaskRow; steps: TaskStep[] } | null> {
+  const task = await getTask(taskId);
   if (!task) return null;
-  const steps = all<TaskStep>('SELECT * FROM task_steps WHERE task_id = ? ORDER BY idx', taskId);
+  const steps = await all<TaskStep>('SELECT * FROM task_steps WHERE task_id = ? ORDER BY idx', taskId);
   return { task, steps };
 }
 
-export function taskStats(): Record<string, number> {
-  const rows = all<{ status: string; n: number }>('SELECT status, COUNT(*) AS n FROM tasks GROUP BY status');
+export async function taskStats(): Promise<Record<string, number>> {
+  const rows = await all<{ status: string; n: number }>('SELECT status, COUNT(*) AS n FROM tasks GROUP BY status');
   const out: Record<string, number> = {};
   for (const row of rows) out[row.status] = Number(row.n);
   return out;
 }
 
-function setStatus(taskId: string, status: TaskStatus, patch: Partial<TaskRow> = {}): void {
+async function setStatus(taskId: string, status: TaskStatus, patch: Partial<TaskRow> = {}): Promise<void> {
   const fields: string[] = ['status = ?', 'updated_at = ?'];
   const params: unknown[] = [status, now()];
   for (const [key, value] of Object.entries(patch)) {
@@ -181,22 +183,22 @@ function setStatus(taskId: string, status: TaskStatus, patch: Partial<TaskRow> =
     params.push(value);
   }
   params.push(taskId);
-  run(`UPDATE tasks SET ${fields.join(', ')} WHERE id = ?`, ...params);
+  await run(`UPDATE tasks SET ${fields.join(', ')} WHERE id = ?`, ...params);
   broadcast('tasks', { taskId, status });
 }
 
-export function cancelTask(taskId: string): void {
-  const task = getTask(taskId);
+export async function cancelTask(taskId: string): Promise<void> {
+  const task = await getTask(taskId);
   if (!task) return;
-  setStatus(taskId, 'cancelled', { error: 'Cancelled by the owner.', heartbeat: null });
+  await setStatus(taskId, 'cancelled', { error: 'Cancelled by the owner.', heartbeat: null });
   logActivity({ level: 'warn', category: 'task', message: `Cancelled "${task.title}".`, taskId });
 }
 
-export function retryTask(taskId: string): void {
-  const task = getTask(taskId);
+export async function retryTask(taskId: string): Promise<void> {
+  const task = await getTask(taskId);
   if (!task) return;
   const checkpoint = safeJson<Checkpoint>(task.checkpoint, { stepIndex: 0 });
-  run(
+  await run(
     `UPDATE tasks SET status = 'queued', error = NULL, attempts = 0, next_run_at = ?, heartbeat = NULL,
       checkpoint = ?, updated_at = ? WHERE id = ?`,
     now(),
@@ -207,16 +209,16 @@ export function retryTask(taskId: string): void {
   broadcast('tasks', { taskId, status: 'queued' });
 }
 
-export function pauseTask(taskId: string): void {
-  const task = getTask(taskId);
+export async function pauseTask(taskId: string): Promise<void> {
+  const task = await getTask(taskId);
   if (!task) return;
-  setStatus(taskId, 'paused', { heartbeat: null });
+  await setStatus(taskId, 'paused', { heartbeat: null });
 }
 
-export function resumeTask(taskId: string): void {
-  const task = getTask(taskId);
+export async function resumeTask(taskId: string): Promise<void> {
+  const task = await getTask(taskId);
   if (!task) return;
-  setStatus(taskId, 'queued', { next_run_at: now(), error: null });
+  await setStatus(taskId, 'queued', { next_run_at: now(), error: null });
 }
 
 /* ------------------------------------------------------------------ */
@@ -283,19 +285,19 @@ Rules: 3-8 steps. Each step must be completable in one agent run using tools (we
 }
 
 async function ensurePlan(task: TaskRow): Promise<TaskStep[]> {
-  const existing = all<TaskStep>('SELECT * FROM task_steps WHERE task_id = ? ORDER BY idx', task.id);
+  const existing = await all<TaskStep>('SELECT * FROM task_steps WHERE task_id = ? ORDER BY idx', task.id);
   if (existing.length) return existing;
   const plan = await planSteps(task);
-  plan.forEach((step, idx) => {
-    run(
+  for (const [idx, step] of plan.entries()) {
+    await run(
       `INSERT INTO task_steps(id, task_id, idx, description, status) VALUES (?, ?, ?, ?, 'pending')`,
       id('stp'),
       task.id,
       idx,
       step.description,
     );
-  });
-  run('UPDATE tasks SET plan = ?, updated_at = ? WHERE id = ?', JSON.stringify(plan), now(), task.id);
+  }
+  await run('UPDATE tasks SET plan = ?, updated_at = ? WHERE id = ?', JSON.stringify(plan), now(), task.id);
   logActivity({
     level: 'info',
     category: 'task',
@@ -303,7 +305,7 @@ async function ensurePlan(task: TaskRow): Promise<TaskStep[]> {
     meta: { steps: plan.map((step) => step.description) },
     taskId: task.id,
   });
-  return all<TaskStep>('SELECT * FROM task_steps WHERE task_id = ? ORDER BY idx', task.id);
+  return await all<TaskStep>('SELECT * FROM task_steps WHERE task_id = ? ORDER BY idx', task.id);
 }
 
 /* ------------------------------------------------------------------ */
@@ -318,21 +320,21 @@ export function isTaskRunning(taskId: string): boolean {
 
 export async function executeTask(taskId: string): Promise<void> {
   if (running.has(taskId)) return;
-  const task = getTask(taskId);
+  const task = await getTask(taskId);
   if (!task) return;
   if (!['queued', 'running', 'paused', 'waiting_approval'].includes(task.status)) return;
 
   const settings = getSettings();
   if (settings.autonomy.state === 'stopped') {
-    setStatus(taskId, 'paused', { error: 'Emergency stop is active.' });
+    await setStatus(taskId, 'paused', { error: 'Emergency stop is active.' });
     return;
   }
   if (settings.autonomy.state === 'paused') {
-    setStatus(taskId, 'paused', { error: 'Autonomy is paused by the owner.' });
+    await setStatus(taskId, 'paused', { error: 'Autonomy is paused by the owner.' });
     return;
   }
-  if (settings.autonomy.dailyTokenBudget > 0 && tokensUsedToday() >= settings.autonomy.dailyTokenBudget) {
-    setStatus(taskId, 'paused', { error: 'Daily token budget reached. BLOBS will resume when you raise it.' });
+  if (settings.autonomy.dailyTokenBudget > 0 && await tokensUsedToday() >= settings.autonomy.dailyTokenBudget) {
+    await setStatus(taskId, 'paused', { error: 'Daily token budget reached. BLOBS will resume when you raise it.' });
     notify({
       title: 'Task paused: token budget reached',
       body: `"${task.title}" is waiting for tomorrow's budget.`,
@@ -344,7 +346,7 @@ export async function executeTask(taskId: string): Promise<void> {
 
   running.add(taskId);
   try {
-    setStatus(taskId, 'running', {
+    await setStatus(taskId, 'running', {
       heartbeat: now(),
       last_run_at: now(),
       attempts: task.attempts + 1,
@@ -359,20 +361,20 @@ export async function executeTask(taskId: string): Promise<void> {
     let lastOutput = task.result ?? '';
 
     while (stepIndex < steps.length) {
-      const current = getTask(taskId);
+      const current = await getTask(taskId);
       if (!current) return;
       if (getSettings().autonomy.state === 'stopped') {
-        setStatus(taskId, 'paused', { error: 'Emergency stop is active.', heartbeat: null });
+        await setStatus(taskId, 'paused', { error: 'Emergency stop is active.', heartbeat: null });
         return;
       }
       if (getSettings().autonomy.state === 'paused') {
-        setStatus(taskId, 'paused', { error: 'Autonomy paused by the owner.', heartbeat: null });
+        await setStatus(taskId, 'paused', { error: 'Autonomy paused by the owner.', heartbeat: null });
         return;
       }
 
       const step = steps[stepIndex];
-      run('UPDATE task_steps SET status = ?, started_at = ? WHERE id = ?', 'running', now(), step.id);
-      run('UPDATE tasks SET heartbeat = ?, updated_at = ? WHERE id = ?', now(), now(), taskId);
+      await run('UPDATE task_steps SET status = ?, started_at = ? WHERE id = ?', 'running', now(), step.id);
+      await run('UPDATE tasks SET heartbeat = ?, updated_at = ? WHERE id = ?', now(), now(), taskId);
       broadcast('tasks', { taskId, status: 'running', stepIndex });
 
       const completed = steps
@@ -396,7 +398,7 @@ export async function executeTask(taskId: string): Promise<void> {
         .join('\n\n');
 
       const messages: LlmMessage[] = [
-        { role: 'system', content: buildSystemPrompt(getSettings(), { taskMode: true, query: task.objective, extraContext: extra }) },
+        { role: 'system', content: await buildSystemPrompt(getSettings(), { taskMode: true, query: task.objective, extraContext: extra }) },
         {
           role: 'user',
           content: `Execute step ${stepIndex + 1} now. Use tools. When it is complete, reply with a 2-4 sentence outcome: what you did, what you found, and anything still blocked. Do not ask me questions.`,
@@ -440,8 +442,8 @@ export async function executeTask(taskId: string): Promise<void> {
       approvalId = result.approval?.id ?? null;
 
       if (approvalId) {
-        run('UPDATE task_steps SET status = ?, output = ? WHERE id = ?', 'pending', truncate(output, 4000), step.id);
-        run(
+        await run('UPDATE task_steps SET status = ?, output = ? WHERE id = ?', 'pending', truncate(output, 4000), step.id);
+        await run(
           'UPDATE tasks SET status = ?, checkpoint = ?, updated_at = ?, heartbeat = NULL WHERE id = ?',
           'waiting_approval',
           JSON.stringify({ stepIndex, pendingApprovalId: approvalId, approvedResults }),
@@ -460,8 +462,8 @@ export async function executeTask(taskId: string): Promise<void> {
       }
 
       if (failure && !output.trim()) {
-        run('UPDATE task_steps SET status = ?, output = ? WHERE id = ?', 'failed', failure, step.id);
-        setStatus(taskId, 'failed', {
+        await run('UPDATE task_steps SET status = ?, output = ? WHERE id = ?', 'failed', failure, step.id);
+        await setStatus(taskId, 'failed', {
           error: truncate(failure, 1500),
           heartbeat: null,
           checkpoint: JSON.stringify({ stepIndex, approvedResults }),
@@ -475,7 +477,7 @@ export async function executeTask(taskId: string): Promise<void> {
       }
 
       lastOutput = output || failure || lastOutput;
-      run(
+      await run(
         'UPDATE task_steps SET status = ?, output = ?, finished_at = ? WHERE id = ?',
         'done',
         truncate(output || '(completed)', 8000),
@@ -483,7 +485,7 @@ export async function executeTask(taskId: string): Promise<void> {
         step.id,
       );
       stepIndex += 1;
-      run(
+      await run(
         'UPDATE tasks SET checkpoint = ?, result = ?, updated_at = ?, heartbeat = ? WHERE id = ?',
         JSON.stringify({ stepIndex, approvedResults }),
         truncate(lastOutput, 8000),
@@ -496,8 +498,8 @@ export async function executeTask(taskId: string): Promise<void> {
 
     const schedule = safeJson<TaskSchedule>(task.schedule, { type: 'once' });
     if (schedule.type === 'interval') {
-      run('DELETE FROM task_steps WHERE task_id = ?', taskId);
-      run(
+      await run('DELETE FROM task_steps WHERE task_id = ?', taskId);
+      await run(
         `UPDATE tasks SET status = 'queued', checkpoint = NULL, plan = NULL, next_run_at = ?, completed_at = ?,
           heartbeat = NULL, updated_at = ? WHERE id = ?`,
         now() + schedule.minutes * 60_000,
@@ -513,7 +515,7 @@ export async function executeTask(taskId: string): Promise<void> {
       });
       broadcast('tasks', { taskId, status: 'queued' });
     } else {
-      setStatus(taskId, 'done', {
+      await setStatus(taskId, 'done', {
         completed_at: now(),
         heartbeat: null,
         result: truncate(lastOutput, 8000),
@@ -532,7 +534,7 @@ export async function executeTask(taskId: string): Promise<void> {
     }
   } catch (error) {
     const message = (error as Error).message;
-    setStatus(taskId, 'failed', { error: truncate(message, 1500), heartbeat: null, completed_at: now() });
+    await setStatus(taskId, 'failed', { error: truncate(message, 1500), heartbeat: null, completed_at: now() });
     logActivity({ level: 'error', category: 'task', message: `Task crashed: ${truncate(message, 300)}`, taskId });
   } finally {
     running.delete(taskId);
@@ -540,11 +542,11 @@ export async function executeTask(taskId: string): Promise<void> {
 }
 
 /** Called when an approval belonging to a task is decided. */
-export function resumeTaskAfterApproval(taskId: string, tool: string, content: string): void {
-  const task = getTask(taskId);
+export async function resumeTaskAfterApproval(taskId: string, tool: string, content: string): Promise<void> {
+  const task = await getTask(taskId);
   if (!task) return;
   const checkpoint = safeJson<Checkpoint>(task.checkpoint, { stepIndex: 0 });
-  run(
+  await run(
     `UPDATE tasks SET status = 'queued', checkpoint = ?, next_run_at = ?, error = NULL, updated_at = ? WHERE id = ?`,
     JSON.stringify({
       stepIndex: checkpoint.stepIndex ?? 0,

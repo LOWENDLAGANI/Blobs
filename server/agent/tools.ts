@@ -325,7 +325,7 @@ export const TOOLS: ToolDef[] = [
     risk: 'low',
     category: 'memory',
     async run(args) {
-      const row = remember({
+      const row = await remember({
         content: str(args, 'content'),
         kind: (str(args, 'kind') || 'fact') as 'fact',
         tags: Array.isArray(args.tags) ? (args.tags as string[]) : [],
@@ -350,7 +350,7 @@ export const TOOLS: ToolDef[] = [
     category: 'memory',
     async run(args) {
       const query = str(args, 'query');
-      const rows = query ? searchMemories(query, num(args, 'limit', 6)) : listMemories({ limit: 6 });
+      const rows = query ? await searchMemories(query, num(args, 'limit', 6)) : await listMemories({ limit: 6 });
       if (!rows.length) return { ok: true, content: 'Nothing relevant is stored in memory.', summary: 'Memory search found nothing.' };
       return {
         ok: true,
@@ -487,7 +487,7 @@ export const TOOLS: ToolDef[] = [
       else if (everyMatch) {
         schedule = { type: 'interval', minutes: Number(everyMatch[1]) * (everyMatch[2] === 'h' ? 60 : 1) };
       }
-      const task = createTask({
+      const task = await createTask({
         title: str(args, 'title') || 'Untitled task',
         objective: str(args, 'objective'),
         projectId: str(args, 'project_id') || null,
@@ -513,7 +513,7 @@ export const TOOLS: ToolDef[] = [
     risk: 'low',
     category: 'tasks',
     async run(args) {
-      const rows = listTaskRows(args.status ? String(args.status) : undefined);
+      const rows = await listTaskRows(args.status ? String(args.status) : undefined);
       if (!rows.length) return { ok: true, content: 'There are no tasks yet.', summary: 'Listed tasks: none.' };
       return {
         ok: true,
@@ -541,10 +541,10 @@ export const TOOLS: ToolDef[] = [
     category: 'system',
     async run(args) {
       if (str(args, 'action') === 'create') {
-        const project = createProject({ title: str(args, 'title') || 'Untitled project', objective: str(args, 'objective') });
+        const project = await createProject({ title: str(args, 'title') || 'Untitled project', objective: str(args, 'objective') });
         return { ok: true, content: `Created project ${project.id}.`, summary: `Created project "${project.title}".` };
       }
-      const updated = updateProject(str(args, 'project_id'), {
+      const updated = await updateProject(str(args, 'project_id'), {
         title: str(args, 'title') || undefined,
         objective: str(args, 'objective') || undefined,
         notesAppend: str(args, 'notes_append') || undefined,
@@ -594,7 +594,7 @@ export const TOOLS: ToolDef[] = [
     approvalKey: 'externalMessages',
     category: 'comms',
     async run(args, context) {
-      const status = emailStatus();
+      const status = await emailStatus();
       if (!status.ready) {
         return {
           ok: false,
@@ -631,7 +631,7 @@ export const TOOLS: ToolDef[] = [
     approvalKey: 'financial',
     category: 'comms',
     async run(args) {
-      const status = phoneStatus();
+      const status = await phoneStatus();
       if (!status.ready) {
         return {
           ok: false,
@@ -683,7 +683,7 @@ TOOLS.push(
     risk: 'low',
     category: 'computer',
     async run() {
-      const status = computerStatus();
+      const status = await computerStatus();
       const lines = [
         `Provider: ${status.provider}`,
         `Connected: ${status.configured ? 'yes' : 'no'}`,
@@ -968,8 +968,8 @@ export function getTool(name: string): ToolDef | null {
   return TOOL_MAP.get(name) ?? null;
 }
 
-export function ownerPhone(): string {
-  const row = get<{ config: string }>("SELECT config FROM integrations WHERE key = 'phone'");
+export async function ownerPhone(): Promise<string> {
+  const row = await get<{ config: string }>("SELECT config FROM integrations WHERE key = 'phone'");
   if (!row?.config) return '';
   try {
     return (JSON.parse(row.config) as { ownerNumber?: string }).ownerNumber ?? '';

@@ -32,30 +32,30 @@ const MAX_FILE_BYTES = 2_000_000;
 let codeCache: { id: string; sandbox: Sandbox } | null = null;
 let desktopCache: { id: string; sandbox: DesktopSandbox } | null = null;
 
-export function e2bApiKey(): string | null {
-  const stored = getSecret('e2b:apiKey');
+export async function e2bApiKey(): Promise<string | null> {
+  const stored = await getSecret('e2b:apiKey');
   if (stored) return stored;
   const fromEnv = process.env.E2B_API_KEY;
   return fromEnv && fromEnv.trim() ? fromEnv.trim() : null;
 }
 
-export function readConfig(): E2BConfig {
-  const row = get<{ config: string }>("SELECT config FROM integrations WHERE key = 'computer'");
+export async function readConfig(): Promise<E2BConfig> {
+  const row = await get<{ config: string }>("SELECT config FROM integrations WHERE key = 'computer'");
   return safeJson<E2BConfig>(row?.config, {});
 }
 
-function writeConfig(patch: Partial<E2BConfig>): void {
+async function writeConfig(patch: Partial<E2BConfig>): Promise<void> {
   const next = { ...readConfig(), ...patch, updatedAt: now() };
-  run(
+  await run(
     `INSERT INTO integrations(key, status, config, updated_at) VALUES ('computer', ?, ?, ?)
      ON CONFLICT(key) DO UPDATE SET status = excluded.status, config = excluded.config, updated_at = excluded.updated_at`,
-    e2bApiKey() ? 'connected' : 'disconnected',
+    await e2bApiKey() ? 'connected' : 'disconnected',
     JSON.stringify(next),
     now(),
   );
 }
 
-export function computerStatus(): {
+export async function computerStatus(): Promise<{
   provider: 'E2B';
   configured: boolean;
   hasKey: boolean;
@@ -64,10 +64,10 @@ export function computerStatus(): {
   desktopId: string | null;
   timeoutMinutes: number;
   detail: string;
-} {
+}> {
   const settings = getSettings();
-  const key = e2bApiKey();
-  const config = readConfig();
+  const key = await e2bApiKey();
+  const config = await readConfig();
   const enabled = settings.computer.enabled;
   return {
     provider: 'E2B',
@@ -85,23 +85,23 @@ export function computerStatus(): {
   };
 }
 
-export function saveComputerKey(key: string): void {
-  setSecret('e2b:apiKey', key);
-  writeConfig({});
+export async function saveComputerKey(key: string): Promise<void> {
+  await setSecret('e2b:apiKey', key);
+  await writeConfig({});
   codeCache = null;
   desktopCache = null;
 }
 
 export async function disconnectComputer(): Promise<void> {
   await resetComputer().catch(() => undefined);
-  setSecret('e2b:apiKey', null);
-  run("UPDATE integrations SET status = 'disconnected', updated_at = ? WHERE key = 'computer'", now());
+  await setSecret('e2b:apiKey', null);
+  await run("UPDATE integrations SET status = 'disconnected', updated_at = ? WHERE key = 'computer'", now());
 }
 
 /** Kill both sandboxes and forget them. */
 export async function resetComputer(): Promise<{ killed: string[]; errors: string[] }> {
-  const key = e2bApiKey();
-  const config = readConfig();
+  const key = await e2bApiKey();
+  const config = await readConfig();
   const killed: string[] = [];
   const errors: string[] = [];
   if (key) {
@@ -117,7 +117,7 @@ export async function resetComputer(): Promise<{ killed: string[]; errors: strin
   }
   codeCache = null;
   desktopCache = null;
-  writeConfig({ sandboxId: undefined, desktopSandboxId: undefined });
+  await writeConfig({ sandboxId: undefined, desktopSandboxId: undefined });
   return { killed, errors };
 }
 
@@ -135,12 +135,12 @@ function friendlyError(error: unknown): Error {
   return new Error(message);
 }
 
-function assertAvailable(): { key: string; timeoutMs: number } {
+async function assertAvailable(): Promise<{ key: string; timeoutMs: number }> {
   const settings = getSettings();
   if (!settings.computer.enabled) {
     throw new Error('Computer access is switched off. Enable it in Settings → Computer.');
   }
-  const key = e2bApiKey();
+  const key = await e2bApiKey();
   if (!key) {
     throw new Error(
       'BLOBS has no cloud computer yet. Add an E2B API key in Integrations → Computer to give it shell, code, files and a desktop.',
@@ -160,8 +160,8 @@ async function createCode(key: string, timeoutMs: number): Promise<Sandbox> {
 
 /** Get (or lazily create and resume) the code sandbox. */
 export async function getCodeSandbox(): Promise<Sandbox> {
-  const { key, timeoutMs } = assertAvailable();
-  const config = readConfig();
+  const { key, timeoutMs } = await assertAvailable();
+  const config = await readConfig();
 
   if (codeCache && (!config.sandboxId || codeCache.id === config.sandboxId)) {
     try {
@@ -179,14 +179,14 @@ export async function getCodeSandbox(): Promise<Sandbox> {
       return sandbox;
     } catch {
       // Expired or killed: fall through and make a new one.
-      writeConfig({ sandboxId: undefined });
+      await writeConfig({ sandboxId: undefined });
     }
   }
 
   try {
     const sandbox = await createCode(key, timeoutMs);
     codeCache = { id: sandbox.sandboxId, sandbox };
-    writeConfig({ sandboxId: sandbox.sandboxId });
+    await writeConfig({ sandboxId: sandbox.sandboxId });
     return sandbox;
   } catch (error) {
     throw friendlyError(error);
@@ -195,8 +195,8 @@ export async function getCodeSandbox(): Promise<Sandbox> {
 
 /** Get (or lazily create) the graphical desktop sandbox. */
 export async function getDesktopSandbox(): Promise<DesktopSandbox> {
-  const { key, timeoutMs } = assertAvailable();
-  const config = readConfig();
+  const { key, timeoutMs } = await assertAvailable();
+  const config = await readConfig();
 
   if (desktopCache && (!config.desktopSandboxId || desktopCache.id === config.desktopSandboxId)) {
     try {
@@ -213,14 +213,14 @@ export async function getDesktopSandbox(): Promise<DesktopSandbox> {
       desktopCache = { id: config.desktopSandboxId, sandbox };
       return sandbox;
     } catch {
-      writeConfig({ desktopSandboxId: undefined });
+      await writeConfig({ desktopSandboxId: undefined });
     }
   }
 
   try {
     const sandbox = await DesktopSandbox.create({ apiKey: key, timeoutMs });
     desktopCache = { id: sandbox.sandboxId, sandbox };
-    writeConfig({ desktopSandboxId: sandbox.sandboxId });
+    await writeConfig({ desktopSandboxId: sandbox.sandboxId });
     return sandbox;
   } catch (error) {
     throw friendlyError(error);

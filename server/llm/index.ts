@@ -47,21 +47,26 @@ export interface RunOptions extends ChatRequest {
   taskId?: string | null;
 }
 
-export function tokensUsedToday(): number {
+export async function tokensUsedToday(): Promise<number> {
   const start = new Date();
   start.setHours(0, 0, 0, 0);
-  const row = count(
+  const row = await count(
     'SELECT COALESCE(SUM(prompt_tokens + completion_tokens), 0) AS n FROM usage_log WHERE ts >= ?',
     start.getTime(),
   );
   return Number(row ?? 0);
 }
 
-export function usageSummary(): { today: number; totalCalls: number; failures: number; budget: number } {
+export async function usageSummary(): Promise<{ today: number; totalCalls: number; failures: number; budget: number }> {
+  const [today, totalCalls, failures] = await Promise.all([
+    tokensUsedToday(),
+    count('SELECT COUNT(*) AS n FROM usage_log'),
+    count('SELECT COUNT(*) AS n FROM usage_log WHERE ok = 0'),
+  ]);
   return {
-    today: tokensUsedToday(),
-    totalCalls: count('SELECT COUNT(*) AS n FROM usage_log'),
-    failures: count('SELECT COUNT(*) AS n FROM usage_log WHERE ok = 0'),
+    today,
+    totalCalls,
+    failures,
     budget: getSettings().autonomy.dailyTokenBudget,
   };
 }
@@ -75,7 +80,7 @@ function logUsage(
   kind: string,
   taskId: string | null,
 ): void {
-  run(
+  void run(
     `INSERT INTO usage_log(id, ts, provider, model, prompt_tokens, completion_tokens, ok, kind, task_id)
      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
     id('use'),
@@ -87,7 +92,7 @@ function logUsage(
     ok ? 1 : 0,
     kind,
     taskId,
-  );
+  ).catch((error) => console.error('Usage log write failed:', (error as Error).message));
 }
 
 /**
@@ -98,7 +103,7 @@ export async function* streamChat(options: RunOptions): AsyncGenerator<LlmEvent>
   const settings = getSettings();
   const providerId = settings.model.provider;
   const budget = settings.autonomy.dailyTokenBudget;
-  if (budget > 0 && tokensUsedToday() > budget) {
+  if (budget > 0 && (await tokensUsedToday()) > budget) {
     throw new LlmError('The daily token budget is used up.', {
       provider: 'BLOBS',
       hint: 'Raise the budget in Settings → Autonomy, or wait until tomorrow.',
@@ -121,7 +126,7 @@ export async function* streamChat(options: RunOptions): AsyncGenerator<LlmEvent>
 
   for (let index = 0; index < attempts.length; index += 1) {
     const { provider, model } = attempts[index];
-    const apiKey = providerApiKey(provider.id);
+    const apiKey = await providerApiKey(provider.id);
     for (let attempt = 0; attempt < 3; attempt += 1) {
       let emitted = false;
       let promptTokens = 0;
@@ -180,18 +185,20 @@ export async function complete(
   return text.trim();
 }
 
-export function providerCatalog(): unknown {
+export async function providerCatalog(): Promise<unknown> {
   const settings = getSettings();
-  return Object.entries(PROVIDERS).map(([key, config]) => ({
-    id: key,
-    label: config.label,
-    note: config.note,
-    model: key === 'custom' ? settings.model.model : config.model,
-    baseUrl: key === 'custom' ? settings.model.customBaseUrl : config.baseUrl,
-    supportsTools: config.supportsTools,
-    hasKey: providerApiKey(key) !== null,
-    active: settings.model.provider === key,
-  }));
+  return Promise.all(
+    Object.entries(PROVIDERS).map(async ([key, config]) => ({
+      id: key,
+      label: config.label,
+      note: config.note,
+      model: key === 'custom' ? settings.model.model : config.model,
+      baseUrl: key === 'custom' ? settings.model.customBaseUrl : config.baseUrl,
+      supportsTools: config.supportsTools,
+      hasKey: (await providerApiKey(key)) !== null,
+      active: settings.model.provider === key,
+    })),
+  );
 }
 
 /** Quick key check used by Settings to confirm a provider works before saving. */
@@ -209,7 +216,7 @@ export async function testProvider(providerId: string): Promise<{ ok: boolean; m
         temperature: 0,
         maxTokens: 16,
       },
-      providerApiKey(providerId),
+      await providerApiKey(providerId),
     )) {
       if (event.type === 'text') text += event.delta;
     }

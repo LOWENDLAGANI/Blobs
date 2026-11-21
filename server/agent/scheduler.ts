@@ -15,15 +15,15 @@ let lastProactive = 0;
 let lastCleanup = 0;
 
 /** Requeue tasks whose process died mid-run instead of restarting them from zero. */
-export function recoverInterruptedTasks(): number {
-  const stale = all<{ id: string; title: string; attempts: number; max_attempts: number }>(
+export async function recoverInterruptedTasks(): Promise<number> {
+  const stale = await all<{ id: string; title: string; attempts: number; max_attempts: number }>(
     `SELECT id, title, attempts, max_attempts FROM tasks
      WHERE status = 'running' AND (heartbeat IS NULL OR heartbeat < ?)`,
     now() - STALE_HEARTBEAT_MS,
   );
   for (const task of stale) {
     if (task.attempts >= task.max_attempts) {
-      run(
+      await run(
         `UPDATE tasks SET status = 'failed', error = ?, heartbeat = NULL, completed_at = ?, updated_at = ? WHERE id = ?`,
         'Interrupted too many times; needs a manual retry.',
         now(),
@@ -32,7 +32,7 @@ export function recoverInterruptedTasks(): number {
       );
       logActivity({ level: 'error', category: 'task', message: `"${task.title}" was interrupted repeatedly and stopped.`, taskId: task.id });
     } else {
-      run(
+      await run(
         `UPDATE tasks SET status = 'queued', heartbeat = NULL, next_run_at = ?, updated_at = ? WHERE id = ?`,
         now(),
         now(),
@@ -49,18 +49,18 @@ export function recoverInterruptedTasks(): number {
   return stale.length;
 }
 
-function cleanup(): void {
+async function cleanup(): Promise<void> {
   const ts = now();
-  run('DELETE FROM sessions WHERE expires_at < ?', ts);
-  run("UPDATE approvals SET status = 'expired' WHERE status = 'pending' AND created_at < ?", ts - 14 * 86_400_000);
+  await run('DELETE FROM sessions WHERE expires_at < ?', ts);
+  await run("UPDATE approvals SET status = 'expired' WHERE status = 'pending' AND created_at < ?", ts - 14 * 86_400_000);
   const retention = getSettings().memory.retentionDays;
   if (retention > 0) {
-    run(
+    await run(
       "DELETE FROM memories WHERE pinned = 0 AND created_at < ? AND kind NOT IN ('preference','decision')",
       ts - retention * 86_400_000,
     );
   }
-  run('DELETE FROM activity WHERE ts < ?', ts - 120 * 86_400_000);
+  await run('DELETE FROM activity WHERE ts < ?', ts - 120 * 86_400_000);
 }
 
 async function proactiveCheck(): Promise<void> {
@@ -69,10 +69,10 @@ async function proactiveCheck(): Promise<void> {
   if (now() - lastProactive < PROACTIVE_INTERVAL_MS) return;
   lastProactive = now();
 
-  const openTasks = all<{ title: string; status: string }>(
+  const openTasks = await all<{ title: string; status: string }>(
     "SELECT title, status FROM tasks WHERE status IN ('queued','running','waiting_approval','paused') LIMIT 8",
   );
-  const projects = all<{ title: string; objective: string }>(
+  const projects = await all<{ title: string; objective: string }>(
     "SELECT title, objective FROM projects WHERE status = 'active' LIMIT 6",
   );
   if (!projects.length && !openTasks.length) return;
@@ -101,11 +101,11 @@ async function tick(): Promise<void> {
     const settings = getSettings();
     if (now() - lastCleanup > 6 * 3_600_000) {
       lastCleanup = now();
-      cleanup();
+      await cleanup();
     }
     if (!settings.autonomy.backgroundEnabled || settings.autonomy.state !== 'active') return;
 
-    const due = all<{ id: string }>(
+    const due = await all<{ id: string }>(
       `SELECT id FROM tasks
        WHERE status = 'queued' AND (next_run_at IS NULL OR next_run_at <= ?)
        ORDER BY created_at ASC LIMIT 2`,
@@ -124,9 +124,9 @@ async function tick(): Promise<void> {
   }
 }
 
-export function startScheduler(): void {
+export async function startScheduler(): Promise<void> {
   if (timer) return;
-  const recovered = recoverInterruptedTasks();
+  const recovered = await recoverInterruptedTasks();
   logActivity({
     level: 'info',
     category: 'system',
@@ -144,14 +144,15 @@ export function stopScheduler(): void {
   timer = null;
 }
 
-export function schedulerState(): Record<string, unknown> {
-  const next = get<{ next_run_at: number | null }>(
-    "SELECT MIN(next_run_at) AS next_run_at FROM tasks WHERE status = 'queued'",
-  );
+export async function schedulerState(): Promise<Record<string, unknown>> {
+  const [next, queued] = await Promise.all([
+    get<{ next_run_at: number | null }>("SELECT MIN(next_run_at) AS next_run_at FROM tasks WHERE status = 'queued'"),
+    get<{ n: number }>("SELECT COUNT(*) AS n FROM tasks WHERE status = 'queued'"),
+  ]);
   return {
     running: timer !== null,
     tickMs: TICK_MS,
-    queued: get<{ n: number }>("SELECT COUNT(*) AS n FROM tasks WHERE status = 'queued'")?.n ?? 0,
+    queued: queued?.n ?? 0,
     nextRunAt: next?.next_run_at ?? null,
   };
 }

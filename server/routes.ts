@@ -134,7 +134,7 @@ export async function registerRoutes(app: FastifyInstance): Promise<void> {
     const path = request.url.split('?')[0];
     if (!path.startsWith('/api')) return;
     if (PUBLIC_PATHS.has(path)) return;
-    if (!isAuthed(request)) {
+    if (!await isAuthed(request)) {
       reply.code(401).send({ error: 'Sign in to continue.' });
       return;
     }
@@ -148,30 +148,30 @@ export async function registerRoutes(app: FastifyInstance): Promise<void> {
   app.get('/api/health', async () => ({
     ok: true,
     version: APP_VERSION,
-    setupRequired: !ownerExists(),
+    setupRequired: !await ownerExists(),
     uptime: Math.round(process.uptime()),
   }));
 
   app.get('/api/auth/state', async (request) => {
     const settings = getSettings();
     return {
-      setupRequired: !ownerExists(),
-      authed: isAuthed(request),
-      ownerName: getOwner()?.name ?? null,
+      setupRequired: !await ownerExists(),
+      authed: await isAuthed(request),
+      ownerName: (await getOwner())?.name ?? null,
       companionName: settings.companion.name,
       tagline: settings.companion.tagline,
     };
   });
 
   app.post('/api/auth/setup', async (request, reply) => {
-    if (ownerExists()) return bad(reply, 'An owner is already configured.', 409);
+    if (await ownerExists()) return bad(reply, 'An owner is already configured.', 409);
     const body = (request.body ?? {}) as { name?: string; passphrase?: string };
     if (!body.passphrase || body.passphrase.length < 8) {
       return bad(reply, 'Choose a passphrase with at least 8 characters.');
     }
-    createOwner(body.name ?? 'Owner', body.passphrase);
-    saveSettings({ owner: { name: (body.name ?? 'Owner').trim() || 'Owner' } });
-    const token = createSession();
+    await createOwner(body.name ?? 'Owner', body.passphrase);
+    await saveSettings({ owner: { name: (body.name ?? 'Owner').trim() || 'Owner' } });
+    const token = await createSession();
     setSessionCookie(reply, token);
     logActivity({ level: 'info', category: 'system', message: 'BLOBS was initialised by its owner.' });
     notify({ title: `Welcome to ${getSettings().companion.name}`, body: 'Start with a voice session, or add a model key in Settings.', level: 'success' });
@@ -182,17 +182,17 @@ export async function registerRoutes(app: FastifyInstance): Promise<void> {
     const body = (request.body ?? {}) as { passphrase?: string };
     const ip = request.ip;
     if (!loginAllowed(ip)) return bad(reply, 'Too many attempts. Wait a minute and try again.', 429);
-    if (!body.passphrase || !verifyPassphrase(body.passphrase)) {
+    if (!body.passphrase || !await verifyPassphrase(body.passphrase)) {
       recordFailedLogin(ip);
       return bad(reply, 'That passphrase is not correct.', 401);
     }
-    const token = createSession();
+    const token = await createSession();
     setSessionCookie(reply, token);
     return { ok: true };
   });
 
   app.post('/api/auth/logout', async (request, reply) => {
-    destroySession(sessionToken(request));
+    await destroySession(sessionToken(request));
     clearSessionCookie(reply);
     return { ok: true };
   });
@@ -218,36 +218,36 @@ export async function registerRoutes(app: FastifyInstance): Promise<void> {
       model: {
         provider: settings.model.provider,
         label: activeModelLabel(settings),
-        hasKey: providerApiKey(settings.model.provider) !== null,
+        hasKey: await providerApiKey(settings.model.provider) !== null,
       },
       autonomy: {
         level: settings.autonomy.level,
         state: settings.autonomy.state,
         backgroundEnabled: settings.autonomy.backgroundEnabled,
       },
-      tasks: taskStats(),
-      memory: memoryStats(),
-      activity: activityCounts(),
-      unread: unreadNotifications(),
-      approvals: listApprovals('pending').length,
-      conversations: Number(get<{ n: number }>('SELECT COUNT(*) AS n FROM conversations')?.n ?? 0),
-      usage: usageSummary(),
-      scheduler: schedulerState(),
+      tasks: await taskStats(),
+      memory: await memoryStats(),
+      activity: await activityCounts(),
+      unread: await unreadNotifications(),
+      approvals: (await listApprovals('pending')).length,
+      conversations: Number((await get<{ n: number }>('SELECT COUNT(*) AS n FROM conversations'))?.n ?? 0),
+      usage: await usageSummary(),
+      scheduler: await schedulerState(),
       tools: toolCatalog().length,
-      email: emailStatus(),
-      phone: phoneStatus(),
+      email: await emailStatus(),
+      phone: await phoneStatus(),
       notifications: { browser: settings.notifications.browser },
-      computer: computerStatus(),
+      computer: await computerStatus(),
     };
   });
 
   /* ---------------- conversations & chat ---------------- */
 
-  app.get('/api/conversations', async () => listConversations());
+  app.get('/api/conversations', async () => await listConversations());
 
   app.get('/api/conversations/:id', async (request, reply) => {
     const { id } = request.params as { id: string };
-    const found = getConversation(id);
+    const found = await getConversation(id);
     if (!found) return bad(reply, 'Conversation not found.', 404);
     return found;
   });
@@ -260,7 +260,7 @@ export async function registerRoutes(app: FastifyInstance): Promise<void> {
 
   app.delete('/api/conversations/:id', async (request) => {
     const { id } = request.params as { id: string };
-    run('DELETE FROM conversations WHERE id = ?', id);
+    await run('DELETE FROM conversations WHERE id = ?', id);
     return { ok: true };
   });
 
@@ -311,16 +311,18 @@ export async function registerRoutes(app: FastifyInstance): Promise<void> {
 
   app.get('/api/tasks', async (request) => {
     const query = request.query as { status?: string };
-    const rows = listTaskRows(query.status);
-    return rows.map((task) => {
-      const steps = all<{ status: string }>('SELECT status FROM task_steps WHERE task_id = ?', task.id);
+    const rows = await listTaskRows(query.status);
+    return Promise.all(
+      rows.map(async (task) => {
+        const steps = await all<{ status: string }>('SELECT status FROM task_steps WHERE task_id = ?', task.id);
       return {
         ...task,
         schedule: task.schedule,
         step_total: steps.length,
         step_done: steps.filter((step) => step.status === 'done').length,
-      };
-    });
+        };
+      }),
+    );
   });
 
   app.post('/api/tasks', async (request, reply) => {
@@ -331,7 +333,7 @@ export async function registerRoutes(app: FastifyInstance): Promise<void> {
       schedule?: unknown;
     };
     if (!body.objective?.trim()) return bad(reply, 'An objective is required.');
-    const task = createTask({
+    const task = await createTask({
       title: body.title?.trim() || body.objective.slice(0, 70),
       objective: body.objective.trim(),
       projectId: body.projectId || null,
@@ -343,17 +345,17 @@ export async function registerRoutes(app: FastifyInstance): Promise<void> {
 
   app.get('/api/tasks/:id', async (request, reply) => {
     const { id } = request.params as { id: string };
-    const detail = taskDetail(id);
+    const detail = await taskDetail(id);
     if (!detail) return bad(reply, 'Task not found.', 404);
     return detail;
   });
 
   app.post('/api/tasks/:id/:action', async (request, reply) => {
     const { id, action } = request.params as { id: string; action: string };
-    const task = getTask(id);
+    const task = await getTask(id);
     if (!task) return bad(reply, 'Task not found.', 404);
     if (action === 'run') {
-      run("UPDATE tasks SET status = 'queued', next_run_at = ?, error = NULL WHERE id = ?", now(), id);
+      await run("UPDATE tasks SET status = 'queued', next_run_at = ?, error = NULL WHERE id = ?", now(), id);
       void executeTask(id);
       return { ok: true };
     }
@@ -378,18 +380,18 @@ export async function registerRoutes(app: FastifyInstance): Promise<void> {
 
   app.delete('/api/tasks/:id', async (request) => {
     const { id } = request.params as { id: string };
-    run('DELETE FROM tasks WHERE id = ?', id);
+    await run('DELETE FROM tasks WHERE id = ?', id);
     return { ok: true };
   });
 
   /* ---------------- projects ---------------- */
 
-  app.get('/api/projects', async () => listProjects());
+  app.get('/api/projects', async () => await listProjects());
 
   app.post('/api/projects', async (request, reply) => {
     const body = (request.body ?? {}) as { title?: string; objective?: string; notes?: string };
     if (!body.title?.trim()) return bad(reply, 'A title is required.');
-    return { ok: true, project: createProject({ title: body.title, objective: body.objective, notes: body.notes }) };
+    return { ok: true, project: await createProject({ title: body.title, objective: body.objective, notes: body.notes }) };
   });
 
   app.patch('/api/projects/:id', async (request, reply) => {
@@ -401,14 +403,14 @@ export async function registerRoutes(app: FastifyInstance): Promise<void> {
       notes?: string;
       notesAppend?: string;
     };
-    const project = updateProject(id, body);
+    const project = await updateProject(id, body);
     if (!project) return bad(reply, 'Project not found.', 404);
     return { ok: true, project };
   });
 
   app.delete('/api/projects/:id', async (request) => {
     const { id } = request.params as { id: string };
-    deleteProject(id);
+    await deleteProject(id);
     return { ok: true };
   });
 
@@ -418,9 +420,9 @@ export async function registerRoutes(app: FastifyInstance): Promise<void> {
     const query = request.query as { query?: string; kind?: string; limit?: string };
     const limit = clamp(Number(query.limit ?? 200), 1, 500);
     if (query.query?.trim()) {
-      return { items: searchMemories(query.query.trim(), limit), stats: memoryStats() };
+      return { items: await searchMemories(query.query.trim(), limit), stats: await memoryStats() };
     }
-    return { items: listMemories({ limit, kind: query.kind }), stats: memoryStats() };
+    return { items: await listMemories({ limit, kind: query.kind }), stats: await memoryStats() };
   });
 
   app.post('/api/memory', async (request, reply) => {
@@ -432,7 +434,7 @@ export async function registerRoutes(app: FastifyInstance): Promise<void> {
       pinned?: boolean;
     };
     if (!body.content?.trim()) return bad(reply, 'Memory content is required.');
-    const row = remember({
+    const row = await remember({
       content: body.content,
       kind: (body.kind as 'fact') ?? 'fact',
       tags: body.tags ?? [],
@@ -452,7 +454,7 @@ export async function registerRoutes(app: FastifyInstance): Promise<void> {
       importance?: number;
       pinned?: boolean;
     };
-    const row = updateMemory(id, {
+    const row = await updateMemory(id, {
       content: body.content,
       kind: body.kind as 'fact',
       tags: body.tags,
@@ -465,7 +467,7 @@ export async function registerRoutes(app: FastifyInstance): Promise<void> {
 
   app.delete('/api/memory/:id', async (request) => {
     const { id } = request.params as { id: string };
-    deleteMemory(id);
+    await deleteMemory(id);
     return { ok: true };
   });
 
@@ -473,26 +475,26 @@ export async function registerRoutes(app: FastifyInstance): Promise<void> {
 
   app.get('/api/activity', async (request) => {
     const query = request.query as { limit?: string; category?: string; level?: string };
-    return { items: listActivity({ limit: Number(query.limit ?? 120), category: query.category, level: query.level }), counts: activityCounts() };
+    return { items: await listActivity({ limit: Number(query.limit ?? 120), category: query.category, level: query.level }), counts: await activityCounts() };
   });
 
-  app.get('/api/notifications', async () => ({ items: listNotifications(), unread: unreadNotifications() }));
+  app.get('/api/notifications', async () => ({ items: await listNotifications(), unread: await unreadNotifications() }));
 
   app.post('/api/notifications/read', async () => {
-    markNotificationsRead();
+    await markNotificationsRead();
     return { ok: true };
   });
 
   app.get('/api/approvals', async (request) => {
     const query = request.query as { status?: string };
-    return { items: listApprovals((query.status as 'pending') ?? 'pending') };
+    return { items: await listApprovals((query.status as 'pending') ?? 'pending') };
   });
 
   app.post('/api/approvals/:id/decide', async (request, reply) => {
     const { id } = request.params as { id: string };
     const body = (request.body ?? {}) as { decision?: 'approved' | 'rejected'; note?: string };
     if (body.decision !== 'approved' && body.decision !== 'rejected') return bad(reply, 'Decision must be approved or rejected.');
-    const approval = decideApproval(id, body.decision, body.note ?? '');
+    const approval = await decideApproval(id, body.decision, body.note ?? '');
     if (!approval) return bad(reply, 'That approval is no longer pending.', 409);
 
     const payload = parseApprovalPayload(approval);
@@ -504,13 +506,13 @@ export async function registerRoutes(app: FastifyInstance): Promise<void> {
         taskId: payload.context.taskId ?? null,
         autonomyLevel: settings.autonomy.level,
       });
-      run(
+      await run(
         'UPDATE approvals SET decision_note = ? WHERE id = ?',
         truncate(result.ok ? `Executed: ${result.summary}` : `Failed: ${result.content}`, 800),
         id,
       );
       if (approval.task_id) {
-        resumeTaskAfterApproval(approval.task_id, payload.tool, result.content);
+        await resumeTaskAfterApproval(approval.task_id, payload.tool, result.content);
       }
     }
 
@@ -530,14 +532,14 @@ export async function registerRoutes(app: FastifyInstance): Promise<void> {
     const limit = clamp(Number(query.limit ?? 60), 1, 200);
     const items =
       query.channel === 'email'
-        ? emailHistory(limit)
+        ? await emailHistory(limit)
         : query.channel === 'phone'
-          ? phoneHistory(limit)
-          : all('SELECT * FROM comms_events ORDER BY created_at DESC LIMIT ?', limit);
-    return { items, email: emailStatus(), phone: phoneStatus() };
+          ? await phoneHistory(limit)
+          : await all('SELECT * FROM comms_events ORDER BY created_at DESC LIMIT ?', limit);
+    return { items, email: await emailStatus(), phone: await phoneStatus() };
   });
 
-  app.get('/api/inbox', async () => fetchInbox(15));
+  app.get('/api/inbox', async () => await fetchInbox(15));
 
   /* ---------------- integrations ---------------- */
 
@@ -571,17 +573,17 @@ export async function registerRoutes(app: FastifyInstance): Promise<void> {
         key: 'email',
         name: 'Email identity',
         category: 'communication',
-        status: emailStatus().ready ? 'connected' : 'disconnected',
-        detail: emailStatus().detail,
+        status: (await emailStatus()).ready ? 'connected' : 'disconnected',
+        detail: (await emailStatus()).detail,
         requires: ['address', 'smtpHost', 'smtpPort', 'username', 'password'],
-        config: emailConfig() ? { ...emailConfig(), password: undefined } : null,
+        config: (await emailConfig()) ? { ...(await emailConfig()), password: undefined } : null,
       },
       {
         key: 'phone',
         name: 'Phone calls (Twilio)',
         category: 'communication',
-        status: phoneStatus().ready ? 'connected' : 'disconnected',
-        detail: phoneStatus().detail,
+        status: (await phoneStatus()).ready ? 'connected' : 'disconnected',
+        detail: (await phoneStatus()).detail,
         requires: ['accountSid', 'authToken', 'fromNumber', 'publicBaseUrl'],
         note: 'Twilio requires a card on file. Trial credit is typically enough for a few test calls; it is not free indefinitely.',
       },
@@ -589,14 +591,14 @@ export async function registerRoutes(app: FastifyInstance): Promise<void> {
         key: 'computer',
         name: 'Cloud computer (E2B)',
         category: 'computer',
-        status: computerStatus().configured ? 'connected' : 'disconnected',
-        detail: computerStatus().detail,
+        status: (await computerStatus()).configured ? 'connected' : 'disconnected',
+        detail: (await computerStatus()).detail,
         requires: ['apiKey'],
         note: 'E2B gives BLOBS its own isolated Linux machine: shell, any language, packages, long-running servers and a graphical desktop. It has a free credit allowance; heavier use is billed by E2B. The owner\'s own computer is never touched.',
         config: {
-          sandboxId: computerStatus().sandboxId,
-          desktopId: computerStatus().desktopId,
-          timeoutMinutes: computerStatus().timeoutMinutes,
+          sandboxId: (await computerStatus()).sandboxId,
+          desktopId: (await computerStatus()).desktopId,
+          timeoutMinutes: (await computerStatus()).timeoutMinutes,
         },
       },
       {
@@ -618,7 +620,7 @@ export async function registerRoutes(app: FastifyInstance): Promise<void> {
     const username = String(body.username ?? address).trim();
     const password = String(body.password ?? '');
     if (!address || !smtpHost) return bad(reply, 'Address and SMTP host are required.');
-    saveEmailConfig({
+    await saveEmailConfig({
       address,
       displayName: String(body.displayName ?? getSettings().companion.name),
       smtpHost,
@@ -628,18 +630,18 @@ export async function registerRoutes(app: FastifyInstance): Promise<void> {
       imapPort: Number(body.imapPort ?? 993),
       username,
     });
-    if (password) setSecret('email:password', password);
-    return { ok: true, status: emailStatus() };
+    if (password) await setSecret('email:password', password);
+    return { ok: true, status: await emailStatus() };
   });
 
   app.delete('/api/integrations/email', async () => {
-    disconnectEmail();
+    await disconnectEmail();
     return { ok: true };
   });
 
   app.post('/api/integrations/email/test', async (request, reply) => {
     const body = (request.body ?? {}) as { to?: string };
-    const to = body.to || emailConfig()?.address;
+    const to = body.to || (await emailConfig())?.address;
     if (!to) return bad(reply, 'No address to test with.');
     const result = await sendEmail({
       to,
@@ -650,14 +652,14 @@ export async function registerRoutes(app: FastifyInstance): Promise<void> {
     return { ok: true };
   });
 
-  app.get('/api/integrations/email/inbox', async () => fetchInbox(15));
+  app.get('/api/integrations/email/inbox', async () => await fetchInbox(15));
 
   app.post('/api/integrations/phone', async (request, reply) => {
     const body = (request.body ?? {}) as Record<string, string>;
     if (!body.accountSid || !body.authToken || !body.fromNumber || !body.publicBaseUrl) {
       return bad(reply, 'Account SID, auth token, from number and public base URL are required.');
     }
-    savePhoneConfig(
+    await savePhoneConfig(
       {
         accountSid: body.accountSid,
         fromNumber: body.fromNumber,
@@ -667,29 +669,29 @@ export async function registerRoutes(app: FastifyInstance): Promise<void> {
       },
       body.authToken,
     );
-    return { ok: true, status: phoneStatus() };
+    return { ok: true, status: await phoneStatus() };
   });
 
   app.delete('/api/integrations/phone', async () => {
-    disconnectPhone();
+    await disconnectPhone();
     return { ok: true };
   });
 
   /* ---------------- cloud computer (E2B) ---------------- */
 
-  app.get('/api/computer/status', async () => computerStatus());
+  app.get('/api/computer/status', async () => await computerStatus());
 
   app.post('/api/integrations/computer', async (request, reply) => {
     const body = (request.body ?? {}) as { apiKey?: string };
     if (!body.apiKey?.trim()) return bad(reply, 'Paste an E2B API key first.');
     saveComputerKey(body.apiKey.trim());
     logActivity({ level: 'info', category: 'integration', message: 'Connected the E2B cloud computer.' });
-    return { ok: true, status: computerStatus() };
+    return { ok: true, status: await computerStatus() };
   });
 
   app.delete('/api/integrations/computer', async () => {
     await disconnectComputer();
-    return { ok: true, status: computerStatus() };
+    return { ok: true, status: await computerStatus() };
   });
 
   app.post('/api/integrations/computer/reset', async () => {
@@ -699,7 +701,7 @@ export async function registerRoutes(app: FastifyInstance): Promise<void> {
       category: 'integration',
       message: `Reset the cloud computer (${result.killed.length} sandbox(es) killed).`,
     });
-    return { ok: true, ...result, status: computerStatus() };
+    return { ok: true, ...result, status: await computerStatus() };
   });
 
   app.post('/api/computer/screenshot', async (_request, reply) => {
@@ -725,7 +727,7 @@ export async function registerRoutes(app: FastifyInstance): Promise<void> {
 
   app.post('/api/voice/twiml', async (request, reply) => {
     const query = request.query as { call?: string; inbound?: string; k?: string };
-    const expected = getSecret('phone:webhookKey');
+    const expected = await getSecret('phone:webhookKey');
     if (!expected || query.k !== expected) {
       reply.code(403).type('text/plain').send('Forbidden');
       return reply;
@@ -738,26 +740,26 @@ export async function registerRoutes(app: FastifyInstance): Promise<void> {
 
     if (query.call) {
       if (!speech) {
-        const xml = outboundTwiml(query.call);
+        const xml = await outboundTwiml(query.call);
         if (!xml) return reply.code(404).send(twimlSay('That call is no longer available.'));
         return xml;
       }
       const conversationId = `phone_${query.call}`;
       const answer = await drainVoiceTurn(conversationId, speech, peer);
-      const phone = phoneStatus();
+      const phone = await phoneStatus();
       const action = phone.ready ? `${phoneBaseUrl()}/api/voice/twiml?call=${encodeURIComponent(query.call)}&k=${encodeURIComponent(expected)}` : undefined;
       return twimlSay(answer, { gather: true, action });
     }
 
     if (query.inbound) {
-      if (!speech) return inboundTwiml();
+      if (!speech) return await inboundTwiml();
       const conversationId = `phone_in_${peer.replace(/\D/g, '').slice(-10)}`;
       const answer = await drainVoiceTurn(conversationId, speech, peer, true);
       const action = `${phoneBaseUrl()}/api/voice/twiml?inbound=1&k=${encodeURIComponent(expected)}`;
       return twimlSay(answer, { gather: true, action });
     }
 
-    return inboundTwiml();
+    return await inboundTwiml();
   });
 
   /* ---------------- settings ---------------- */
@@ -765,15 +767,15 @@ export async function registerRoutes(app: FastifyInstance): Promise<void> {
   app.get('/api/settings', async () => ({
     settings: getSettings(),
     defaults: DEFAULT_SETTINGS,
-    providers: providerCatalog(),
+    providers: await providerCatalog(),
     providerNotes: Object.fromEntries(Object.entries(PROVIDERS).map(([key, value]) => [key, value.note])),
-    usage: usageSummary(),
-    secrets: { hasEmailPassword: getSecret('email:password') !== null, hasPhoneToken: getSecret('phone:authToken') !== null },
+    usage: await usageSummary(),
+    secrets: { hasEmailPassword: await getSecret('email:password') !== null, hasPhoneToken: await getSecret('phone:authToken') !== null },
     version: APP_VERSION,
   }));
 
   app.patch('/api/settings', async (request) => {
-    const saved = saveSettings(request.body ?? {});
+    const saved = await saveSettings(request.body ?? {});
     logActivity({ level: 'info', category: 'settings', message: 'Settings updated.' });
     return { ok: true, settings: saved };
   });
@@ -782,15 +784,15 @@ export async function registerRoutes(app: FastifyInstance): Promise<void> {
     const body = (request.body ?? {}) as { provider?: string; key?: string };
     if (!body.provider || !PROVIDERS[body.provider]) return bad(reply, 'Unknown provider.');
     if (!body.key?.trim()) return bad(reply, 'Paste the API key first.');
-    setSecret(`provider:${body.provider}`, body.key.trim());
+    await setSecret(`provider:${body.provider}`, body.key.trim());
     logActivity({ level: 'info', category: 'settings', message: `Saved an API key for ${PROVIDERS[body.provider].label}.` });
-    return { ok: true, providers: providerCatalog() };
+    return { ok: true, providers: await providerCatalog() };
   });
 
   app.delete('/api/settings/provider-key/:provider', async (request) => {
     const { provider } = request.params as { provider: string };
-    setSecret(`provider:${provider}`, null);
-    return { ok: true, providers: providerCatalog() };
+    await setSecret(`provider:${provider}`, null);
+    return { ok: true, providers: await providerCatalog() };
   });
 
   app.post('/api/settings/test-provider', async (request, reply) => {
@@ -804,7 +806,7 @@ export async function registerRoutes(app: FastifyInstance): Promise<void> {
   app.post('/api/settings/autonomy', async (request, reply) => {
     const body = (request.body ?? {}) as { state?: 'active' | 'paused' | 'stopped' };
     if (!body.state || !['active', 'paused', 'stopped'].includes(body.state)) return bad(reply, 'Invalid state.');
-    saveSettings({ autonomy: { state: body.state } });
+    await saveSettings({ autonomy: { state: body.state } });
     const message =
       body.state === 'stopped'
         ? 'Emergency stop engaged: autonomous work halted.'
@@ -820,8 +822,8 @@ export async function registerRoutes(app: FastifyInstance): Promise<void> {
 
 /* ---------------- voice helpers ---------------- */
 
-function phoneBaseUrl(): string {
-  const config = get<{ config: string }>("SELECT config FROM integrations WHERE key = 'phone'");
+async function phoneBaseUrl(): Promise<string> {
+  const config = await get<{ config: string }>("SELECT config FROM integrations WHERE key = 'phone'");
   if (!config?.config) return '';
   try {
     return String((JSON.parse(config.config) as { publicBaseUrl?: string }).publicBaseUrl ?? '').replace(/\/$/, '');
@@ -843,7 +845,7 @@ async function drainVoiceTurn(
   const settings = getSettings();
   const clean = text.replace(/[*_#`]/g, '').replace(/\s+/g, ' ').trim();
   const spoken = clean || 'I am here, but I could not produce a reply just now. Let me try again on the website.';
-  run(
+  await run(
     `INSERT INTO comms_events(id, channel, direction, peer, subject, body, status, external_id, meta, created_at)
      VALUES (?, 'phone', ?, ?, ?, ?, 'completed', ?, ?, ?)`,
     `cm_${Date.now().toString(36)}${Math.random().toString(36).slice(2, 7)}`,

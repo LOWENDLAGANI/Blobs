@@ -15,6 +15,22 @@ export interface ActivityInput {
 type Listener = (event: { type: string; data: unknown }) => void;
 const listeners = new Set<Listener>();
 
+/** Writes that are in flight. Reads await them so a log is never reported missing. */
+const pending = new Set<Promise<void>>();
+
+function track(work: Promise<void>): void {
+  pending.add(work);
+  void work
+    .catch((error) => console.error('Activity write failed:', (error as Error).message))
+    .finally(() => pending.delete(work));
+}
+
+/** Wait for every queued activity/notification write to reach the database. */
+export async function flushActivity(): Promise<void> {
+  if (!pending.size) return;
+  await Promise.allSettled([...pending]);
+}
+
 /** Fan-out to every connected SSE client. Listener failures never break a run. */
 export function broadcast(type: string, data: unknown): void {
   for (const listener of listeners) {
@@ -31,6 +47,10 @@ export function subscribe(listener: Listener): () => void {
   return () => listeners.delete(listener);
 }
 
+/**
+ * Logging stays synchronous for callers: the row is written in the background
+ * so a slow or remote database never stalls the agent loop. Reads flush first.
+ */
 export function logActivity(input: ActivityInput): void {
   const entry = {
     id: id('act'),
@@ -42,17 +62,19 @@ export function logActivity(input: ActivityInput): void {
     task_id: input.taskId ?? null,
     conversation_id: input.conversationId ?? null,
   };
-  run(
-    `INSERT INTO activity(id, ts, level, category, message, meta, task_id, conversation_id)
-     VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
-    entry.id,
-    entry.ts,
-    entry.level,
-    entry.category,
-    entry.message,
-    entry.meta,
-    entry.task_id,
-    entry.conversation_id,
+  track(
+    run(
+      `INSERT INTO activity(id, ts, level, category, message, meta, task_id, conversation_id)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
+      entry.id,
+      entry.ts,
+      entry.level,
+      entry.category,
+      entry.message,
+      entry.meta,
+      entry.task_id,
+      entry.conversation_id,
+    ),
   );
   broadcast('activity', entry);
 }
@@ -68,7 +90,8 @@ export interface ActivityRow {
   conversation_id: string | null;
 }
 
-export function listActivity(options: { limit?: number; category?: string; level?: string } = {}): ActivityRow[] {
+export async function listActivity(options: { limit?: number; category?: string; level?: string } = {}): Promise<ActivityRow[]> {
+  await flushActivity();
   const limit = Math.min(Math.max(options.limit ?? 100, 1), 500);
   const clauses: string[] = [];
   const params: unknown[] = [];
@@ -84,12 +107,14 @@ export function listActivity(options: { limit?: number; category?: string; level
   return all<ActivityRow>(`SELECT * FROM activity ${where} ORDER BY ts DESC LIMIT ${limit}`, ...params);
 }
 
-export function activityCounts(): Record<string, number> {
-  return {
-    total: count('SELECT COUNT(*) AS n FROM activity'),
-    errors: count("SELECT COUNT(*) AS n FROM activity WHERE level = 'error'"),
-    actions: count("SELECT COUNT(*) AS n FROM activity WHERE level = 'action'"),
-  };
+export async function activityCounts(): Promise<Record<string, number>> {
+  await flushActivity();
+  const [total, errors, actions] = await Promise.all([
+    count('SELECT COUNT(*) AS n FROM activity'),
+    count("SELECT COUNT(*) AS n FROM activity WHERE level = 'error'"),
+    count("SELECT COUNT(*) AS n FROM activity WHERE level = 'action'"),
+  ]);
+  return { total, errors, actions };
 }
 
 /* ------------------------------------------------------------------ */
@@ -113,29 +138,33 @@ export function notify(input: NotificationInput): void {
     read: 0,
     link: input.link ?? null,
   };
-  run(
-    `INSERT INTO notifications(id, ts, title, body, level, read, link) VALUES (?, ?, ?, ?, ?, ?, ?)`,
-    row.id,
-    row.ts,
-    row.title,
-    row.body,
-    row.level,
-    row.read,
-    row.link,
+  track(
+    run(
+      `INSERT INTO notifications(id, ts, title, body, level, read, link) VALUES (?, ?, ?, ?, ?, ?, ?)`,
+      row.id,
+      row.ts,
+      row.title,
+      row.body,
+      row.level,
+      row.read,
+      row.link,
+    ),
   );
   broadcast('notification', row);
 }
 
-export function listNotifications(limit = 30): unknown[] {
+export async function listNotifications(limit = 30): Promise<unknown[]> {
+  await flushActivity();
   return all('SELECT * FROM notifications ORDER BY ts DESC LIMIT ?', Math.min(limit, 100));
 }
 
-export function unreadNotifications(): number {
+export async function unreadNotifications(): Promise<number> {
+  await flushActivity();
   return count('SELECT COUNT(*) AS n FROM notifications WHERE read = 0');
 }
 
-export function markNotificationsRead(): void {
-  run('UPDATE notifications SET read = 1 WHERE read = 0');
+export async function markNotificationsRead(): Promise<void> {
+  await run('UPDATE notifications SET read = 1 WHERE read = 0');
 }
 
 export function notificationRow(raw: string | null): Record<string, unknown> | null {

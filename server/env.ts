@@ -34,6 +34,18 @@ export const WORKSPACE_DIR = path.join(DATA_DIR, 'workspace');
 export const TMP_DIR = path.join(DATA_DIR, 'tmp');
 export const DB_PATH = path.join(DATA_DIR, 'blobs.db');
 
+/**
+ * Where the agent's memory actually lives.
+ *
+ * Unset      → the local libSQL file inside DATA_DIR (offline, still SQLite).
+ * libsql://  → Turso Cloud, authenticated with DB_AUTH_TOKEN.
+ * file:…     → a local libSQL file, optionally synced by DB_SYNC_URL.
+ */
+export const DB_URL = process.env.DB_URL ?? process.env.TURSO_DATABASE_URL ?? `file:${DB_PATH}`;
+export const DB_AUTH_TOKEN = process.env.DB_AUTH_TOKEN ?? process.env.TURSO_AUTH_TOKEN ?? '';
+export const DB_SYNC_URL = process.env.DB_SYNC_URL ?? '';
+export const DB_SYNC_SECONDS = Number(process.env.DB_SYNC_SECONDS ?? 30);
+
 export const PORT = Number(process.env.PORT ?? 3000);
 export const HOST = process.env.HOST ?? '0.0.0.0';
 export const SESSION_DAYS = Number(process.env.SESSION_DAYS ?? 30);

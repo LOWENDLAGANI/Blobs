@@ -238,21 +238,34 @@ function deepMerge<T>(base: T, patch: unknown): T {
 
 const SETTINGS_KEY = 'app';
 
+/**
+ * Settings are read on almost every request and inside the agent loop, so they
+ * are held in memory: hydrated once at boot, replaced on every save. A remote
+ * database therefore never adds a round trip to a hot path.
+ */
+let settingsCache: Settings | null = null;
+
 export function getSettings(): Settings {
-  const row = get<{ value: string }>('SELECT value FROM settings WHERE key = ?', SETTINGS_KEY);
-  const stored = safeJson<Record<string, unknown>>(row?.value, {});
-  return deepMerge(DEFAULT_SETTINGS, stored);
+  return settingsCache ?? DEFAULT_SETTINGS;
 }
 
-export function saveSettings(patch: unknown): Settings {
+export async function hydrateSettings(): Promise<Settings> {
+  const row = await get<{ value: string }>('SELECT value FROM settings WHERE key = ?', SETTINGS_KEY);
+  const stored = safeJson<Record<string, unknown>>(row?.value, {});
+  settingsCache = deepMerge(DEFAULT_SETTINGS, stored);
+  return settingsCache;
+}
+
+export async function saveSettings(patch: unknown): Promise<Settings> {
   const merged = deepMerge(getSettings(), patch);
-  run(
+  await run(
     `INSERT INTO settings(key, value, updated_at) VALUES (?, ?, ?)
      ON CONFLICT(key) DO UPDATE SET value = excluded.value, updated_at = excluded.updated_at`,
     SETTINGS_KEY,
     JSON.stringify(merged),
     now(),
   );
+  settingsCache = merged;
   return merged;
 }
 
@@ -260,18 +273,18 @@ export function saveSettings(patch: unknown): Settings {
 /* Secrets: encrypted at rest, never returned to the browser.          */
 /* ------------------------------------------------------------------ */
 
-export function getSecret(key: string): string | null {
-  const row = get<{ value: string }>('SELECT value FROM secrets WHERE key = ?', key);
+export async function getSecret(key: string): Promise<string | null> {
+  const row = await get<{ value: string }>('SELECT value FROM secrets WHERE key = ?', key);
   if (!row) return null;
   return decrypt(row.value);
 }
 
-export function setSecret(key: string, value: string | null): void {
+export async function setSecret(key: string, value: string | null): Promise<void> {
   if (value === null || value.trim() === '') {
-    run('DELETE FROM secrets WHERE key = ?', key);
+    await run('DELETE FROM secrets WHERE key = ?', key);
     return;
   }
-  run(
+  await run(
     `INSERT INTO secrets(key, value, updated_at) VALUES (?, ?, ?)
      ON CONFLICT(key) DO UPDATE SET value = excluded.value, updated_at = excluded.updated_at`,
     key,
@@ -280,17 +293,17 @@ export function setSecret(key: string, value: string | null): void {
   );
 }
 
-export function hasSecret(key: string): boolean {
-  return getSecret(key) !== null;
+export async function hasSecret(key: string): Promise<boolean> {
+  return (await getSecret(key)) !== null;
 }
 
-export function secretKeys(): string[] {
-  return all<{ key: string }>('SELECT key FROM secrets').map((row) => row.key);
+export async function secretKeys(): Promise<string[]> {
+  return (await all<{ key: string }>('SELECT key FROM secrets')).map((row) => row.key);
 }
 
 /** Provider keys are read from the encrypted store, then from the environment. */
-export function providerApiKey(provider: string): string | null {
-  const fromStore = getSecret(`provider:${provider}`);
+export async function providerApiKey(provider: string): Promise<string | null> {
+  const fromStore = await getSecret(`provider:${provider}`);
   if (fromStore) return fromStore;
   const envName = `${provider.toUpperCase()}_API_KEY`;
   const fromEnv = process.env[envName];

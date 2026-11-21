@@ -19,19 +19,19 @@ function hashPassphrase(passphrase: string, salt: string): string {
   return crypto.scryptSync(passphrase, salt, SCRYPT_KEYLEN).toString('hex');
 }
 
-export function ownerExists(): boolean {
-  return get<{ id: number }>('SELECT id FROM owner WHERE id = 1') !== null;
+export async function ownerExists(): Promise<boolean> {
+  return (await get<{ id: number }>('SELECT id FROM owner WHERE id = 1')) !== null;
 }
 
-export function getOwner(): OwnerRow | null {
+export async function getOwner(): Promise<OwnerRow | null> {
   return get<OwnerRow>('SELECT * FROM owner WHERE id = 1');
 }
 
-export function createOwner(name: string, passphrase: string): void {
-  if (ownerExists()) throw new Error('An owner already exists.');
+export async function createOwner(name: string, passphrase: string): Promise<void> {
+  if (await ownerExists()) throw new Error('An owner already exists.');
   if (passphrase.trim().length < 8) throw new Error('Use a passphrase of at least 8 characters.');
   const salt = crypto.randomBytes(16).toString('hex');
-  run(
+  await run(
     'INSERT INTO owner(id, name, passphrase_hash, salt, created_at) VALUES (1, ?, ?, ?, ?)',
     name.trim() || 'Owner',
     hashPassphrase(passphrase, salt),
@@ -40,18 +40,18 @@ export function createOwner(name: string, passphrase: string): void {
   );
 }
 
-export function changePassphrase(current: string, next: string): void {
-  const owner = getOwner();
+export async function changePassphrase(current: string, next: string): Promise<void> {
+  const owner = await getOwner();
   if (!owner) throw new Error('No owner configured.');
-  if (!verifyPassphrase(current)) throw new Error('The current passphrase is incorrect.');
+  if (!(await verifyPassphrase(current))) throw new Error('The current passphrase is incorrect.');
   if (next.trim().length < 8) throw new Error('Use a passphrase of at least 8 characters.');
   const salt = crypto.randomBytes(16).toString('hex');
-  run('UPDATE owner SET passphrase_hash = ?, salt = ? WHERE id = 1', hashPassphrase(next, salt), salt);
-  run('DELETE FROM sessions');
+  await run('UPDATE owner SET passphrase_hash = ?, salt = ? WHERE id = 1', hashPassphrase(next, salt), salt);
+  await run('DELETE FROM sessions');
 }
 
-export function verifyPassphrase(passphrase: string): boolean {
-  const owner = getOwner();
+export async function verifyPassphrase(passphrase: string): Promise<boolean> {
+  const owner = await getOwner();
   if (!owner) return false;
   const expected = Buffer.from(owner.passphrase_hash, 'hex');
   const actual = Buffer.from(hashPassphrase(passphrase, owner.salt), 'hex');
@@ -78,40 +78,40 @@ export function recordFailedLogin(ip: string): void {
   attempts.set(ip, record);
 }
 
-export function createSession(): string {
+export async function createSession(): Promise<string> {
   const token = crypto.randomBytes(32).toString('base64url');
   const ts = now();
-  run(
+  await run(
     'INSERT INTO sessions(token_hash, created_at, expires_at, last_seen) VALUES (?, ?, ?, ?)',
     sha256(token),
     ts,
     ts + SESSION_DAYS * 86_400_000,
     ts,
   );
-  run('DELETE FROM sessions WHERE expires_at < ?', ts);
+  await run('DELETE FROM sessions WHERE expires_at < ?', ts);
   return token;
 }
 
-export function sessionValid(token: string | undefined): boolean {
+export async function sessionValid(token: string | undefined): Promise<boolean> {
   if (!token) return false;
-  const row = get<{ expires_at: number; last_seen: number }>(
+  const row = await get<{ expires_at: number; last_seen: number }>(
     'SELECT expires_at, last_seen FROM sessions WHERE token_hash = ?',
     sha256(token),
   );
   if (!row) return false;
   if (row.expires_at < now()) {
-    run('DELETE FROM sessions WHERE token_hash = ?', sha256(token));
+    await run('DELETE FROM sessions WHERE token_hash = ?', sha256(token));
     return false;
   }
   if (now() - row.last_seen > 3_600_000) {
-    run('UPDATE sessions SET last_seen = ? WHERE token_hash = ?', now(), sha256(token));
+    await run('UPDATE sessions SET last_seen = ? WHERE token_hash = ?', now(), sha256(token));
   }
   return true;
 }
 
-export function destroySession(token: string | undefined): void {
+export async function destroySession(token: string | undefined): Promise<void> {
   if (!token) return;
-  run('DELETE FROM sessions WHERE token_hash = ?', sha256(token));
+  await run('DELETE FROM sessions WHERE token_hash = ?', sha256(token));
 }
 
 export function setSessionCookie(reply: FastifyReply, token: string): void {
@@ -132,7 +132,7 @@ export function sessionToken(request: FastifyRequest): string | undefined {
   return request.cookies?.[COOKIE];
 }
 
-export function isAuthed(request: FastifyRequest): boolean {
+export async function isAuthed(request: FastifyRequest): Promise<boolean> {
   return sessionValid(sessionToken(request));
 }
 

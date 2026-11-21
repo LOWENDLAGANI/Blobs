@@ -12,8 +12,8 @@ export interface PhoneConfig {
   voice: string;
 }
 
-export function phoneConfig(): PhoneConfig | null {
-  const row = get<{ config: string }>("SELECT config FROM integrations WHERE key = 'phone'");
+export async function phoneConfig(): Promise<PhoneConfig | null> {
+  const row = await get<{ config: string }>("SELECT config FROM integrations WHERE key = 'phone'");
   if (!row?.config) return null;
   const parsed = safeJson<Partial<PhoneConfig>>(row.config, {});
   if (!parsed.accountSid || !parsed.fromNumber || !parsed.publicBaseUrl) return null;
@@ -26,9 +26,9 @@ export function phoneConfig(): PhoneConfig | null {
   };
 }
 
-export function phoneStatus(): { ready: boolean; number: string | null; detail: string } {
-  const config = phoneConfig();
-  const token = getSecret('phone:authToken');
+export async function phoneStatus(): Promise<{ ready: boolean; number: string | null; detail: string }> {
+  const config = await phoneConfig();
+  const token = await getSecret('phone:authToken');
   if (!config) {
     return {
       ready: false,
@@ -68,7 +68,7 @@ async function twilioRequest(
   path: string,
   body: URLSearchParams,
 ): Promise<{ ok: boolean; data?: Record<string, unknown>; error?: string }> {
-  const token = getSecret('phone:authToken');
+  const token = await getSecret('phone:authToken');
   if (!token) return { ok: false, error: 'Missing auth token.' };
   const auth = Buffer.from(`${config.accountSid}:${token}`).toString('base64');
   try {
@@ -96,14 +96,14 @@ async function twilioRequest(
 }
 
 export async function placeCall(input: { message: string; to?: string | null }): Promise<{ ok: boolean; error?: string }> {
-  const config = phoneConfig();
+  const config = await phoneConfig();
   if (!config) return { ok: false, error: 'Phone is not connected.' };
   const to = (input.to || config.ownerNumber || '').trim();
   if (!to) return { ok: false, error: 'No destination number configured.' };
 
   const eventId = id('call');
   const message = truncate(input.message, 1200);
-  run(
+  await run(
     `INSERT INTO comms_events(id, channel, direction, peer, subject, body, status, external_id, meta, created_at)
      VALUES (?, 'phone', 'outbound', ?, ?, ?, 'dialing', NULL, ?, ?)`,
     eventId,
@@ -114,7 +114,7 @@ export async function placeCall(input: { message: string; to?: string | null }):
     now(),
   );
 
-  const key = getSecret('phone:webhookKey');
+  const key = await getSecret('phone:webhookKey');
   const actionUrl = `${config.publicBaseUrl}/api/voice/twiml?call=${encodeURIComponent(eventId)}&k=${encodeURIComponent(key ?? '')}`;
   const body = new URLSearchParams({
     To: to,
@@ -125,24 +125,24 @@ export async function placeCall(input: { message: string; to?: string | null }):
 
   const result = await twilioRequest(config, 'Calls.json', body);
   if (!result.ok) {
-    run("UPDATE comms_events SET status = 'failed', meta = ? WHERE id = ?", JSON.stringify({ error: result.error }), eventId);
+    await run("UPDATE comms_events SET status = 'failed', meta = ? WHERE id = ?", JSON.stringify({ error: result.error }), eventId);
     logActivity({ level: 'error', category: 'phone', message: `Call failed: ${truncate(result.error ?? '', 200)}` });
     return { ok: false, error: result.error };
   }
   const sid = String((result.data as { sid?: string }).sid ?? '');
-  run("UPDATE comms_events SET status = 'ringing', external_id = ? WHERE id = ?", sid, eventId);
+  await run("UPDATE comms_events SET status = 'ringing', external_id = ? WHERE id = ?", sid, eventId);
   logActivity({ level: 'action', category: 'phone', message: `Placed a call to ${to}.` });
   return { ok: true };
 }
 
 /** TwiML for an outbound call answered by the owner. */
-export function outboundTwiml(eventId: string): string | null {
-  const row = get<{ body: string; subject: string }>('SELECT body, subject FROM comms_events WHERE id = ?', eventId);
+export async function outboundTwiml(eventId: string): Promise<string | null> {
+  const row = await get<{ body: string; subject: string }>('SELECT body, subject FROM comms_events WHERE id = ?', eventId);
   if (!row) return null;
-  const config = phoneConfig();
+  const config = await phoneConfig();
   const continueUrl = config
     ? `${config.publicBaseUrl}/api/voice/twiml?call=${encodeURIComponent(eventId)}&k=${encodeURIComponent(
-        getSecret('phone:webhookKey') ?? '',
+        await getSecret('phone:webhookKey') ?? '',
       )}`
     : undefined;
   return twimlSay(
@@ -155,10 +155,10 @@ function getSettingsName(): string {
   return getSettings().companion.name;
 }
 
-export function inboundTwiml(): string {
-  const config = phoneConfig();
+export async function inboundTwiml(): Promise<string> {
+  const config = await phoneConfig();
   const action = config
-    ? `${config.publicBaseUrl}/api/voice/twiml?inbound=1&k=${encodeURIComponent(getSecret('phone:webhookKey') ?? '')}`
+    ? `${config.publicBaseUrl}/api/voice/twiml?inbound=1&k=${encodeURIComponent(await getSecret('phone:webhookKey') ?? '')}`
     : undefined;
   return twimlSay(
     `Hello, this is ${getSettingsName()}, an AI assistant. How can I help?`,
@@ -166,16 +166,16 @@ export function inboundTwiml(): string {
   );
 }
 
-export function savePhoneConfig(config: PhoneConfig, authToken: string): void {
-  run(
+export async function savePhoneConfig(config: PhoneConfig, authToken: string): Promise<void> {
+  await run(
     `INSERT INTO integrations(key, status, config, updated_at) VALUES ('phone', 'connected', ?, ?)
      ON CONFLICT(key) DO UPDATE SET status = 'connected', config = excluded.config, updated_at = excluded.updated_at`,
     JSON.stringify(config),
     now(),
   );
-  setSecret('phone:authToken', authToken);
-  if (!getSecret('phone:webhookKey')) {
-    setSecret('phone:webhookKey', cryptoRandom());
+  await setSecret('phone:authToken', authToken);
+  if (!await getSecret('phone:webhookKey')) {
+    await setSecret('phone:webhookKey', cryptoRandom());
   }
   logActivity({ level: 'info', category: 'integration', message: `Connected phone ${config.fromNumber}.` });
 }
@@ -185,23 +185,23 @@ function cryptoRandom(): string {
   return id('whk');
 }
 
-export function disconnectPhone(): void {
-  run("UPDATE integrations SET status = 'disconnected', updated_at = ? WHERE key = 'phone'", now());
-  run("DELETE FROM secrets WHERE key IN ('phone:authToken','phone:webhookKey')");
+export async function disconnectPhone(): Promise<void> {
+  await run("UPDATE integrations SET status = 'disconnected', updated_at = ? WHERE key = 'phone'", now());
+  await run("DELETE FROM secrets WHERE key IN ('phone:authToken','phone:webhookKey')");
   logActivity({ level: 'warn', category: 'integration', message: 'Disconnected phone.' });
 }
 
-export function phoneHistory(limit = 40): unknown[] {
-  return all("SELECT * FROM comms_events WHERE channel = 'phone' ORDER BY created_at DESC LIMIT ?", Math.min(limit, 200));
+export async function phoneHistory(limit = 40): Promise<unknown[]> {
+  return await all("SELECT * FROM comms_events WHERE channel = 'phone' ORDER BY created_at DESC LIMIT ?", Math.min(limit, 200));
 }
 
-export function logCallEvent(input: {
+export async function logCallEvent(input: {
   direction: 'inbound' | 'outbound';
   peer: string;
   body: string;
   status: string;
-}): void {
-  run(
+}): Promise<void> {
+  await run(
     `INSERT INTO comms_events(id, channel, direction, peer, subject, body, status, external_id, meta, created_at)
      VALUES (?, 'phone', ?, ?, ?, ?, ?, NULL, NULL, ?)`,
     id('cm'),

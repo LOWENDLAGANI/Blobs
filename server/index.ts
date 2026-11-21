@@ -4,10 +4,11 @@ import Fastify from 'fastify';
 import cookie from '@fastify/cookie';
 import fastifyStatic from '@fastify/static';
 import { HOST, PORT, ROOT, APP_VERSION } from './env.ts';
+import { ready } from './db.ts';
 import { registerRoutes } from './routes.ts';
 import { startScheduler, stopScheduler } from './agent/scheduler.ts';
-import { logActivity } from './activity.ts';
-import { getSettings } from './settings.ts';
+import { flushActivity, logActivity } from './activity.ts';
+import { getSettings, hydrateSettings } from './settings.ts';
 
 const app = Fastify({
   logger: { level: process.env.LOG_LEVEL ?? 'warn' },
@@ -53,6 +54,9 @@ if (hasDist) {
 
 async function boot(): Promise<void> {
   try {
+    // Schema creation and the settings snapshot must exist before the first request.
+    await ready;
+    await hydrateSettings();
     await app.listen({ host: HOST, port: PORT });
     const settings = getSettings();
     logActivity({
@@ -60,7 +64,7 @@ async function boot(): Promise<void> {
       category: 'system',
       message: `BLOBS ${APP_VERSION} online on port ${PORT} (model: ${settings.model.provider}/${settings.model.model}).`,
     });
-    startScheduler();
+    await startScheduler();
     console.log(`BLOBS listening on http://${HOST}:${PORT} — model ${settings.model.provider}/${settings.model.model}`);
   } catch (error) {
     console.error('Failed to start BLOBS:', error);
@@ -73,6 +77,7 @@ void boot();
 const shutdown = async (signal: string): Promise<void> => {
   console.log(`\n${signal} received, shutting down.`);
   stopScheduler();
+  await flushActivity();
   await app.close().catch(() => undefined);
   process.exit(0);
 };

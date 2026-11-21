@@ -4,14 +4,14 @@ A persistent, voice-first personal AI agent. Not a chatbot with a nicer skin —
 identity, long-term memory, a task engine that keeps working after you close the tab, and a control centre to watch and
 steer it.
 
-Built to run on a free tier first: browser-native voice, free web research, SQLite on disk, and a model layer you can
-point at Gemini's free tier, a small DeepSeek top-up, or any OpenAI-compatible endpoint.
+Built to run on a free tier first: browser-native voice, free web research, SQLite (on disk or in Turso Cloud), and a
+model layer you can point at Gemini's free tier, a small DeepSeek top-up, or any OpenAI-compatible endpoint.
 
 ```
 ┌──────────────────────────────┐        ┌──────────────────────────────────────────┐
 │  Web control centre (React)  │  SSE   │  Agent server (Node + Fastify)            │
 │  voice · chat · tasks · mem  │◄──────►│  provider adapter · tool loop · approvals │
-└──────────────────────────────┘        │  task engine · scheduler · SQLite         │
+└──────────────────────────────┘        │  task engine · scheduler · libSQL → Turso  │
                                         └───────────────┬──────────────────────────┘
                                                         │
                              DeepSeek / Gemini / Groq / OpenRouter / Ollama / custom
@@ -21,7 +21,7 @@ point at Gemini's free tier, a small DeepSeek top-up, or any OpenAI-compatible e
 
 ## Quick start
 
-Requires **Node 22.6+** (uses the built-in `node:sqlite`, so there are no native modules to compile).
+Requires **Node 22.6+**. The database driver is libSQL, which ships prebuilt binaries — nothing to compile.
 
 ```bash
 npm install
@@ -40,6 +40,49 @@ For development with hot reload:
 npm run dev          # API on :8787
 npm run web          # Vite UI on :3000, proxying /api
 ```
+
+## Where memory lives: local file or Turso
+
+BLOBS keeps everything — memory, conversations, tasks, approvals, settings — in one SQLite schema. The client speaks
+libSQL, so the same code runs against a file on the server or a Turso Cloud database across the network.
+
+```bash
+# 1. local file (default, works offline, nothing to sign up for)
+DB_URL=file:.data/blobs.db
+
+# 2. Turso Cloud — memory survives a lost, rebuilt or replaced server
+turso auth login                          # once
+turso db create blobs
+turso db show blobs --url                 # → libsql://blobs-<org>.turso.io
+
+DB_URL=libsql://blobs-<org>.turso.io
+DB_AUTH_TOKEN=<token from `turso db tokens create blobs`>
+```
+
+Moving an existing local agent to Turso is a dump and an import, not a rewrite:
+
+```bash
+turso db shell blobs < <(sqlite3 .data/blobs.db .dump)   # or: turso db import blobs .data/blobs.db
+```
+
+**Embedded replica** is the best of both: reads hit a local file at disk speed, writes go to Turso, and the replica
+pulls the rest on an interval. If the machine dies, the cloud copy is the source of truth.
+
+```bash
+DB_URL=file:.data/blobs.db
+DB_SYNC_URL=libsql://blobs-<org>.turso.io
+DB_AUTH_TOKEN=<token>
+DB_SYNC_SECONDS=30
+```
+
+Notes that matter in practice:
+
+- The schema and the memory ranking are unchanged: the `memories` table, the FTS5 index with the `porter` tokenizer,
+the three sync triggers and `bm25(memories_fts, 1.0, 0.4)` all run on libSQL and Turso Cloud as-is.
+- Turso's Free plan (100 databases, 5 GB, 500M rows read/month) is far beyond one owner's usage.
+- `.data/secret.key` (or `BLOBS_SECRET`) encrypts stored integration keys and is deliberately **not** part of the
+database. If you restore onto a new machine, either copy that key or re-enter the integration credentials.
+- The server awaits schema creation before it accepts traffic, so a fresh Turso database bootstraps itself on first run.
 
 ## Models: what is actually free
 
@@ -238,5 +281,6 @@ web/src/
 scripts/              smoke + tools verification
 ```
 
-Data lives in `.data/` by default (`blobs.db`, `workspace/`, `secret.key`). Back up that directory and you have backed up
-BLOBS.
+The database lives wherever `DB_URL` points (`.data/blobs.db` by default, or Turso). Everything else — the file
+workspace, the E2B screenshot cache and `secret.key` — stays in `.data/`, so copy that directory (plus your Turso
+database, if you use one) and you have backed up BLOBS.

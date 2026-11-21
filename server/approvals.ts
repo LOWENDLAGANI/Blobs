@@ -37,14 +37,14 @@ const CATEGORY_LABEL: Record<string, string> = {
   security: 'a security or account change',
 };
 
-export function createApproval(input: {
+export async function createApproval(input: {
   kind: string;
   title: string;
   detail: string;
   payload: ApprovalPayload;
   taskId?: string | null;
   conversationId?: string | null;
-}): ApprovalRow {
+}): Promise<ApprovalRow> {
   const row: ApprovalRow = {
     id: id('apr'),
     kind: input.kind,
@@ -58,7 +58,7 @@ export function createApproval(input: {
     decided_at: null,
     decision_note: null,
   };
-  run(
+  await run(
     `INSERT INTO approvals(id, kind, title, detail, payload, status, task_id, conversation_id, created_at, decided_at, decision_note)
      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
     row.id,
@@ -90,23 +90,23 @@ export function createApproval(input: {
   return row;
 }
 
-export function listApprovals(status: ApprovalStatus | 'all' = 'pending'): ApprovalRow[] {
+export async function listApprovals(status: ApprovalStatus | 'all' = 'pending'): Promise<ApprovalRow[]> {
   if (status === 'all') return all<ApprovalRow>('SELECT * FROM approvals ORDER BY created_at DESC LIMIT 100');
   return all<ApprovalRow>('SELECT * FROM approvals WHERE status = ? ORDER BY created_at DESC LIMIT 100', status);
 }
 
-export function getApproval(approvalId: string): ApprovalRow | null {
+export async function getApproval(approvalId: string): Promise<ApprovalRow | null> {
   return get<ApprovalRow>('SELECT * FROM approvals WHERE id = ?', approvalId);
 }
 
-export function decideApproval(
+export async function decideApproval(
   approvalId: string,
   decision: 'approved' | 'rejected',
   note = '',
-): ApprovalRow | null {
-  const row = getApproval(approvalId);
+): Promise<ApprovalRow | null> {
+  const row = await getApproval(approvalId);
   if (!row || row.status !== 'pending') return null;
-  run(
+  await run(
     'UPDATE approvals SET status = ?, decided_at = ?, decision_note = ? WHERE id = ?',
     decision,
     now(),

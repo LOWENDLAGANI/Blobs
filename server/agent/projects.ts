@@ -12,7 +12,7 @@ export interface ProjectRow {
   updated_at: number;
 }
 
-export function createProject(input: { title: string; objective?: string; notes?: string }): ProjectRow {
+export async function createProject(input: { title: string; objective?: string; notes?: string }): Promise<ProjectRow> {
   const ts = now();
   const row: ProjectRow = {
     id: id('prj'),
@@ -23,7 +23,7 @@ export function createProject(input: { title: string; objective?: string; notes?
     created_at: ts,
     updated_at: ts,
   };
-  run(
+  await run(
     `INSERT INTO projects(id, title, objective, status, notes, created_at, updated_at)
      VALUES (?, ?, ?, ?, ?, ?, ?)`,
     row.id,
@@ -38,7 +38,7 @@ export function createProject(input: { title: string; objective?: string; notes?
   return row;
 }
 
-export function listProjects(): (ProjectRow & { task_count: number; open_tasks: number })[] {
+export async function listProjects(): Promise<(ProjectRow & { task_count: number; open_tasks: number })[]> {
   return all<ProjectRow & { task_count: number; open_tasks: number }>(
     `SELECT p.*,
             (SELECT COUNT(*) FROM tasks t WHERE t.project_id = p.id) AS task_count,
@@ -49,15 +49,15 @@ export function listProjects(): (ProjectRow & { task_count: number; open_tasks: 
   );
 }
 
-export function getProject(projectId: string): ProjectRow | null {
+export async function getProject(projectId: string): Promise<ProjectRow | null> {
   return get<ProjectRow>('SELECT * FROM projects WHERE id = ?', projectId);
 }
 
-export function updateProject(
+export async function updateProject(
   projectId: string,
   patch: { title?: string; objective?: string; status?: 'active' | 'paused' | 'done'; notesAppend?: string; notes?: string },
-): ProjectRow | null {
-  const existing = getProject(projectId);
+): Promise<ProjectRow | null> {
+  const existing = await getProject(projectId);
   if (!existing) return null;
   const notes =
     patch.notes !== undefined
@@ -65,7 +65,7 @@ export function updateProject(
       : patch.notesAppend
         ? `${existing.notes}\n\n${new Date().toISOString().slice(0, 10)} — ${patch.notesAppend}`.trim()
         : existing.notes;
-  run(
+  await run(
     'UPDATE projects SET title = ?, objective = ?, status = ?, notes = ?, updated_at = ? WHERE id = ?',
     patch.title ?? existing.title,
     patch.objective ?? existing.objective,
@@ -77,8 +77,8 @@ export function updateProject(
   return getProject(projectId);
 }
 
-export function deleteProject(projectId: string): boolean {
-  if (!getProject(projectId)) return false;
-  run('DELETE FROM projects WHERE id = ?', projectId);
+export async function deleteProject(projectId: string): Promise<boolean> {
+  if (!(await getProject(projectId))) return false;
+  await run('DELETE FROM projects WHERE id = ?', projectId);
   return true;
 }

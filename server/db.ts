@@ -1,10 +1,36 @@
-import { DatabaseSync } from 'node:sqlite';
-import { DB_PATH } from './env.ts';
+import { createClient, type Client } from '@libsql/client';
+import { DB_AUTH_TOKEN, DB_SYNC_SECONDS, DB_SYNC_URL, DB_URL } from './env.ts';
 
-export const db = new DatabaseSync(DB_PATH);
-db.exec('PRAGMA journal_mode = WAL;');
-db.exec('PRAGMA foreign_keys = ON;');
-db.exec('PRAGMA busy_timeout = 5000;');
+/**
+ * Data layer. libSQL is used for every environment:
+ *
+ *   DB_URL=file:.data/blobs.db              local file (default, offline)
+ *   DB_URL=libsql://<db>-<org>.turso.io     Turso Cloud, with DB_AUTH_TOKEN
+ *   DB_URL=file:.data/blobs.db + DB_SYNC_URL Turso embedded replica
+ *
+ * The SQL is plain SQLite: same tables, same FTS5 index, same bm25 ranking.
+ * The client is asynchronous because a remote database answers over the
+ * network, so every caller awaits.
+ */
+/** Local file + remote primary: reads stay local, writes and pulls sync to Turso. */
+const EMBEDDED = Boolean(DB_SYNC_URL) && DB_URL.startsWith('file:');
+
+export const client: Client = EMBEDDED
+  ? createClient({ url: DB_URL, syncUrl: DB_SYNC_URL, authToken: DB_AUTH_TOKEN || undefined })
+  : createClient(DB_AUTH_TOKEN ? { url: DB_URL, authToken: DB_AUTH_TOKEN } : { url: DB_URL });
+
+/** Pull remote changes into the local replica. No-op for a plain file or remote DB. */
+export async function syncNow(): Promise<void> {
+  if (!EMBEDDED) return;
+  await client.sync();
+}
+
+if (EMBEDDED) {
+  const timer = setInterval(() => {
+    void client.sync().catch((error) => console.error('libSQL sync failed:', (error as Error).message));
+  }, Math.max(5, DB_SYNC_SECONDS) * 1_000);
+  timer.unref?.();
+}
 
 const SCHEMA = `
 CREATE TABLE IF NOT EXISTS settings (
@@ -211,7 +237,24 @@ CREATE TABLE IF NOT EXISTS notifications (
 CREATE INDEX IF NOT EXISTS idx_notifications_ts ON notifications(ts DESC);
 `;
 
-db.exec(SCHEMA);
+/**
+ * Schema creation is asynchronous now, so it runs once as `ready`. The server
+ * awaits it before accepting traffic; tests and scripts await it too.
+ */
+export const ready: Promise<void> = (async () => {
+  if (EMBEDDED) {
+    // A fresh replica has nothing local yet; pull the primary first.
+    await client.sync().catch(() => undefined);
+  }
+  await client.executeMultiple(SCHEMA);
+  try {
+    // Per-connection in a local file; a no-op for a remote database, which
+    // enforces foreign keys server-side.
+    await client.execute('PRAGMA foreign_keys = ON');
+  } catch {
+    /* the server owns this setting when the database is remote */
+  }
+})();
 
 type Param = string | number | null;
 export type Row = Record<string, unknown>;
@@ -225,32 +268,34 @@ function normalize(params: unknown[]): Param[] {
   });
 }
 
-export function all<T = Row>(sql: string, ...params: unknown[]): T[] {
-  return db.prepare(sql).all(...normalize(params)) as T[];
+export async function all<T = Row>(sql: string, ...params: unknown[]): Promise<T[]> {
+  const result = await client.execute({ sql, args: normalize(params) });
+  return result.rows as unknown as T[];
 }
 
-export function get<T = Row>(sql: string, ...params: unknown[]): T | null {
-  const row = db.prepare(sql).get(...normalize(params));
-  return (row as T) ?? null;
+export async function get<T = Row>(sql: string, ...params: unknown[]): Promise<T | null> {
+  const result = await client.execute({ sql, args: normalize(params) });
+  return (result.rows[0] as unknown as T) ?? null;
 }
 
-export function run(sql: string, ...params: unknown[]): void {
-  db.prepare(sql).run(...normalize(params));
+export async function run(sql: string, ...params: unknown[]): Promise<void> {
+  await client.execute({ sql, args: normalize(params) });
 }
 
-export function tx<T>(fn: () => T): T {
-  db.exec('BEGIN');
+export async function count(sql: string, ...params: unknown[]): Promise<number> {
+  const row = await get<{ n: number }>(sql, ...params);
+  return Number(row?.n ?? 0);
+}
+
+/** Write transaction. libSQL wraps BEGIN/COMMIT so a rollback is guaranteed. */
+export async function tx<T>(fn: () => Promise<T>): Promise<T> {
+  const transaction = await client.transaction('write');
   try {
-    const result = fn();
-    db.exec('COMMIT');
+    const result = await fn();
+    await transaction.commit();
     return result;
   } catch (error) {
-    db.exec('ROLLBACK');
+    await transaction.rollback();
     throw error;
   }
-}
-
-export function count(sql: string, ...params: unknown[]): number {
-  const row = get<{ n: number }>(sql, ...params);
-  return Number(row?.n ?? 0);
 }

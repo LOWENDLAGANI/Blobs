@@ -167,7 +167,7 @@ export async function* agentLoop(
 
       if (requiresApproval(tool, options.context)) {
         const approvalKind = approvalCategory(tool);
-        const approval = createApproval({
+        const approval = await createApproval({
           kind: approvalKind,
           title: `${tool.name} → ${JSON.stringify(parsed.value).slice(0, 80)}`,
           detail: describeApproval(approvalKind, tool.name, parsed.value),

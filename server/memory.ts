@@ -39,7 +39,7 @@ const KIND_LABELS: Record<string, string> = {
   note: 'NOTE',
 };
 
-export function remember(input: MemoryInput): MemoryRow {
+export async function remember(input: MemoryInput): Promise<MemoryRow> {
   const content = input.content.trim();
   if (!content) throw new Error('A memory needs content.');
   const ts = now();
@@ -56,7 +56,7 @@ export function remember(input: MemoryInput): MemoryRow {
     last_used_at: null,
     use_count: 0,
   };
-  run(
+  await run(
     `INSERT INTO memories(id, kind, content, tags, importance, source, pinned, created_at, updated_at, last_used_at, use_count)
      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
     row.id,
@@ -80,11 +80,11 @@ export function remember(input: MemoryInput): MemoryRow {
   return row;
 }
 
-export function updateMemory(
+export async function updateMemory(
   memoryId: string,
   patch: Partial<Pick<MemoryInput, 'content' | 'kind' | 'tags' | 'importance' | 'pinned'>>,
-): MemoryRow | null {
-  const existing = get<MemoryRow>('SELECT * FROM memories WHERE id = ?', memoryId);
+): Promise<MemoryRow | null> {
+  const existing = await get<MemoryRow>('SELECT * FROM memories WHERE id = ?', memoryId);
   if (!existing) return null;
   const next: MemoryRow = {
     ...existing,
@@ -97,7 +97,7 @@ export function updateMemory(
     pinned: patch.pinned !== undefined ? (patch.pinned ? 1 : 0) : existing.pinned,
     updated_at: now(),
   };
-  run(
+  await run(
     `UPDATE memories SET content = ?, kind = ?, tags = ?, importance = ?, pinned = ?, updated_at = ? WHERE id = ?`,
     next.content,
     next.kind,
@@ -110,14 +110,14 @@ export function updateMemory(
   return get<MemoryRow>('SELECT * FROM memories WHERE id = ?', memoryId);
 }
 
-export function deleteMemory(memoryId: string): boolean {
-  const existing = get<{ id: string }>('SELECT id FROM memories WHERE id = ?', memoryId);
+export async function deleteMemory(memoryId: string): Promise<boolean> {
+  const existing = await get<{ id: string }>('SELECT id FROM memories WHERE id = ?', memoryId);
   if (!existing) return false;
-  run('DELETE FROM memories WHERE id = ?', memoryId);
+  await run('DELETE FROM memories WHERE id = ?', memoryId);
   return true;
 }
 
-export function listMemories(options: { limit?: number; kind?: string; query?: string } = {}): MemoryRow[] {
+export async function listMemories(options: { limit?: number; kind?: string; query?: string } = {}): Promise<MemoryRow[]> {
   const limit = Math.min(Math.max(options.limit ?? 200, 1), 500);
   const clauses: string[] = [];
   const params: unknown[] = [];
@@ -147,13 +147,13 @@ function ftsQuery(text: string): string {
  * Hybrid retrieval: BM25 over FTS5, blended with importance, pinning and
  * recency so the agent recalls what actually matters instead of everything.
  */
-export function searchMemories(query: string, limit = 8): MemoryRow[] {
+export async function searchMemories(query: string, limit = 8): Promise<MemoryRow[]> {
   const max = Math.min(Math.max(limit, 1), 40);
   const match = ftsQuery(query);
   const results = new Map<string, MemoryRow>();
 
   if (match) {
-    const rows = all<MemoryRow & { bm: number }>(
+    const rows = await all<MemoryRow & { bm: number }>(
       `SELECT m.*, bm25(memories_fts, 1.0, 0.4) AS bm
        FROM memories_fts JOIN memories m ON m.id = memories_fts.id
        WHERE memories_fts MATCH ? ORDER BY bm LIMIT ?`,
@@ -173,23 +173,24 @@ export function searchMemories(query: string, limit = 8): MemoryRow[] {
     }
   }
 
-  for (const pinned of all<MemoryRow>('SELECT * FROM memories WHERE pinned = 1 ORDER BY updated_at DESC LIMIT ?', max)) {
+  const pinnedRows = await all<MemoryRow>('SELECT * FROM memories WHERE pinned = 1 ORDER BY updated_at DESC LIMIT ?', max);
+  for (const pinned of pinnedRows) {
     if (!results.has(pinned.id)) results.set(pinned.id, { ...pinned, score: 0.35 + (pinned.importance / 5) * 0.1 });
   }
 
   const ranked = [...results.values()].sort((a, b) => (b.score ?? 0) - (a.score ?? 0)).slice(0, max);
   if (ranked.length) {
     const stamp = now();
-    for (const row of ranked) {
-      run('UPDATE memories SET last_used_at = ?, use_count = use_count + 1 WHERE id = ?', stamp, row.id);
-    }
+    await Promise.all(
+      ranked.map((row) => run('UPDATE memories SET last_used_at = ?, use_count = use_count + 1 WHERE id = ?', stamp, row.id)),
+    );
   }
   return ranked;
 }
 
 /** Compact block injected into the system prompt. Empty string when nothing matches. */
-export function memoryContext(query: string, limit = 8): string {
-  const rows = searchMemories(query, limit);
+export async function memoryContext(query: string, limit = 8): Promise<string> {
+  const rows = await searchMemories(query, limit);
   if (!rows.length) return '';
   const lines = rows.map((row) => {
     const kind = KIND_LABELS[row.kind] ?? row.kind.toUpperCase();
@@ -198,9 +199,11 @@ export function memoryContext(query: string, limit = 8): string {
   return lines.join('\n');
 }
 
-export function memoryStats(): Record<string, unknown> {
-  const byKind = all<{ kind: string; n: number }>('SELECT kind, COUNT(*) AS n FROM memories GROUP BY kind');
-  const total = get<{ n: number }>('SELECT COUNT(*) AS n FROM memories');
+export async function memoryStats(): Promise<Record<string, unknown>> {
+  const [byKind, total] = await Promise.all([
+    all<{ kind: string; n: number }>('SELECT kind, COUNT(*) AS n FROM memories GROUP BY kind'),
+    get<{ n: number }>('SELECT COUNT(*) AS n FROM memories'),
+  ]);
   return {
     total: Number(total?.n ?? 0),
     byKind: Object.fromEntries(byKind.map((row) => [row.kind, Number(row.n)])),
