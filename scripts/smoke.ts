@@ -12,11 +12,48 @@ import http from 'node:http';
 import fs from 'node:fs';
 import path from 'node:path';
 import { spawn } from 'node:child_process';
+import { Client } from 'pg';
 
 const STUB_PORT = 8799;
 const APP_PORT = 8811;
 const DATA_DIR = path.resolve(import.meta.dirname, '..', '.data', 'smoke');
 const BASE = `http://127.0.0.1:${APP_PORT}`;
+
+/**
+ * The smoke test wipes its database, so it never reuses DATABASE_URL on its
+ * own. It runs against a dedicated local database (`blobs_smoke`) created on
+ * demand; point SMOKE_DATABASE_URL at another throwaway Postgres to override.
+ */
+const SMOKE_DB_URL = process.env.SMOKE_DATABASE_URL ?? 'postgresql://postgres:postgres@127.0.0.1:5432/blobs_smoke';
+
+function isLocalDatabase(url: string): boolean {
+  return /(^|@)(localhost|127\.0\.0\.1|\[::1\])([:/]|$)/.test(url);
+}
+
+async function resetDatabase(): Promise<void> {
+  const target = new URL(SMOKE_DB_URL);
+  const database = decodeURIComponent(target.pathname.slice(1)) || 'blobs_smoke';
+  const adminUrl = new URL(SMOKE_DB_URL);
+  adminUrl.pathname = '/postgres';
+
+  if (isLocalDatabase(SMOKE_DB_URL)) {
+    const admin = new Client({ connectionString: adminUrl.toString() });
+    await admin.connect();
+    const existing = await admin.query('select 1 from pg_database where datname = $1', [database]);
+    if (!existing.rowCount) {
+      await admin.query(`create database "${database.replace(/"/g, '')}"`);
+    }
+    await admin.end();
+  }
+
+  const client = new Client({ connectionString: SMOKE_DB_URL });
+  await client.connect();
+  const tables = await client.query("select tablename from pg_tables where schemaname = 'public'");
+  for (const row of tables.rows as { tablename: string }[]) {
+    await client.query(`truncate table "${row.tablename.replace(/"/g, '')}" restart identity cascade`);
+  }
+  await client.end();
+}
 
 let passes = 0;
 let failures = 0;
@@ -186,6 +223,7 @@ async function chat(text: string): Promise<{ events: { type: string; [key: strin
 /* --------------------------------- runner -------------------------------- */
 
 async function main(): Promise<void> {
+  await resetDatabase();
   fs.rmSync(DATA_DIR, { recursive: true, force: true });
   fs.mkdirSync(DATA_DIR, { recursive: true });
 
@@ -199,6 +237,11 @@ async function main(): Promise<void> {
       PORT: String(APP_PORT),
       HOST: '127.0.0.1',
       DATA_DIR,
+      DATABASE_URL: SMOKE_DB_URL,
+      PG_SSL: 'disable',
+      // Keep the passphrase login path under test regardless of the shell env.
+      SUPABASE_URL: '',
+      SUPABASE_SERVICE_ROLE_KEY: '',
       BLOBS_SECRET: 'smoke-test-secret-value-0123456789',
       LOG_LEVEL: 'error',
     },

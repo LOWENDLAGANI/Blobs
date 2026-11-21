@@ -20,16 +20,17 @@
     "@e2b/desktop": "^2.5.0",
     "@fastify/cookie": "^11.0.2",
     "@fastify/static": "^8.0.4",
-    "@libsql/client": "^0.18.0",
     "e2b": "^2.64.0",
     "fastify": "^5.2.1",
     "imapflow": "^1.0.179",
-    "nodemailer": "^6.9.16"
+    "nodemailer": "^6.9.16",
+    "pg": "^8.13.1"
   },
   "devDependencies": {
     "@daytona/sdk": "^2.1.0",
     "@types/node": "^22.10.5",
     "@types/nodemailer": "^6.4.17",
+    "@types/pg": "^8.11.10",
     "@types/react": "^19.0.7",
     "@types/react-dom": "^19.0.3",
     "@vitejs/plugin-react": "^4.3.4",

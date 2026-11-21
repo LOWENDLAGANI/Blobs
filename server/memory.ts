@@ -126,7 +126,8 @@ export async function listMemories(options: { limit?: number; kind?: string; que
     params.push(options.kind);
   }
   if (options.query?.trim()) {
-    clauses.push('(content LIKE ? OR tags LIKE ?)');
+    // SQLite's LIKE was case-insensitive; Postgres needs ILIKE for parity.
+    clauses.push('(content ILIKE ? OR tags ILIKE ?)');
     const like = `%${options.query.trim()}%`;
     params.push(like, like);
   }
@@ -137,14 +138,22 @@ export async function listMemories(options: { limit?: number; kind?: string; que
   );
 }
 
+/**
+ * Postgres full-text query: prefix-matched lexemes, OR-ed together. Tokens are
+ * reduced to letters and digits by the regex, so nothing can inject tsquery
+ * syntax; the whole string is still passed as a bound parameter.
+ */
 function ftsQuery(text: string): string {
   const tokens = (text.toLowerCase().match(/[\p{L}\p{N}]{2,}/gu) ?? []).slice(0, 14);
   if (!tokens.length) return '';
-  return tokens.map((token) => `"${token.replace(/"/g, '')}"*`).join(' OR ');
+  return tokens.map((token) => `'${token}':*`).join(' | ');
 }
 
+/** The indexed document; must match the GIN index expression in the schema. */
+const SEARCH_DOC = "to_tsvector('english', coalesce(m.content, '') || ' ' || coalesce(m.tags, ''))";
+
 /**
- * Hybrid retrieval: BM25 over FTS5, blended with importance, pinning and
+ * Hybrid retrieval: full-text rank, blended with importance, pinning and
  * recency so the agent recalls what actually matters instead of everything.
  */
 export async function searchMemories(query: string, limit = 8): Promise<MemoryRow[]> {
@@ -153,15 +162,16 @@ export async function searchMemories(query: string, limit = 8): Promise<MemoryRo
   const results = new Map<string, MemoryRow>();
 
   if (match) {
-    const rows = await all<MemoryRow & { bm: number }>(
-      `SELECT m.*, bm25(memories_fts, 1.0, 0.4) AS bm
-       FROM memories_fts JOIN memories m ON m.id = memories_fts.id
-       WHERE memories_fts MATCH ? ORDER BY bm LIMIT ?`,
+    const rows = await all<MemoryRow & { rank: number }>(
+      `SELECT m.*, ts_rank(${SEARCH_DOC}, q.query) AS rank
+       FROM memories m, to_tsquery('english', ?) AS q(query)
+       WHERE ${SEARCH_DOC} @@ q.query
+       ORDER BY rank DESC LIMIT ?`,
       match,
       max * 3,
     );
     for (const row of rows) {
-      const relevance = 1 / (1 + Math.abs(row.bm));
+      const relevance = Math.min(1, Math.max(0, row.rank));
       const ageDays = (now() - row.updated_at) / 86_400_000;
       const recency = Math.exp(-ageDays / 120);
       row.score =

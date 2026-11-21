@@ -21,6 +21,7 @@ interface SettingsResponse {
   providers: ProviderInfo[];
   providerNotes: Record<string, string>;
   usage: { today: number; totalCalls: number; failures: number; budget: number };
+  auth: { mode: 'supabase' | 'passphrase'; email: string | null };
   version: string;
 }
 
@@ -31,7 +32,7 @@ export function SettingsPage({ refreshShell }: { refreshShell: () => Promise<voi
   const [apiKey, setApiKey] = useState('');
   const [busy, setBusy] = useState<string | null>(null);
   const [voices, setVoices] = useState<SpeechSynthesisVoice[]>([]);
-  const [passphrase, setPassphrase] = useState({ current: '', next: '' });
+  const [credentials, setCredentials] = useState({ current: '', next: '' });
   const [channelSecrets, setChannelSecrets] = useState({ telegram: '', webhook: '' });
   const [channelResult, setChannelResult] = useState<string | null>(null);
 
@@ -142,12 +143,12 @@ export function SettingsPage({ refreshShell }: { refreshShell: () => Promise<voi
     }
   };
 
-  const changePassphrase = async (): Promise<void> => {
+  const changePassword = async (): Promise<void> => {
     setBusy('pass');
     try {
-      await post('/api/auth/passphrase', passphrase);
-      setPassphrase({ current: '', next: '' });
-      toast('Passphrase changed. You will be signed out on other devices.', 'good');
+      await post('/api/auth/password', credentials);
+      setCredentials({ current: '', next: '' });
+      toast('Password changed. Every session has been signed out, so sign in again.', 'good');
     } catch (error) {
       toast((error as Error).message, 'bad');
     } finally {
@@ -790,28 +791,30 @@ export function SettingsPage({ refreshShell }: { refreshShell: () => Promise<voi
       <p className="section-title">Security</p>
       <Card className="stack">
         <p className="note">
-          API keys are encrypted with a server-side master key and never sent to the browser. The interface is protected
-          by a single owner passphrase, sessions are http-only cookies, and every state-changing request is checked for
-          same-origin.
+          API keys are encrypted with a server-side master key and never sent to the browser. The interface is protected by{' '}
+          {data.auth.mode === 'supabase'
+            ? `email sign-in through Supabase Auth${data.auth.email ? ` (${data.auth.email})` : ''}`
+            : 'a single owner passphrase'}
+          , sessions are http-only cookies, and every state-changing request is checked for same-origin.
         </p>
         <div className="grid-2">
-          <Field label="Current passphrase">
+          <Field label={data.auth.mode === 'supabase' ? 'Current password' : 'Current passphrase'}>
             <Input
               type="password"
-              value={passphrase.current}
-              onChange={(event) => setPassphrase({ ...passphrase, current: event.target.value })}
+              value={credentials.current}
+              onChange={(event) => setCredentials({ ...credentials, current: event.target.value })}
             />
           </Field>
-          <Field label="New passphrase">
+          <Field label={data.auth.mode === 'supabase' ? 'New password' : 'New passphrase'}>
             <Input
               type="password"
-              value={passphrase.next}
-              onChange={(event) => setPassphrase({ ...passphrase, next: event.target.value })}
+              value={credentials.next}
+              onChange={(event) => setCredentials({ ...credentials, next: event.target.value })}
             />
           </Field>
         </div>
-        <Button busy={busy === 'pass'} onClick={() => void changePassphrase()}>
-          Change passphrase
+        <Button busy={busy === 'pass'} onClick={() => void changePassword()}>
+          Change {data.auth.mode === 'supabase' ? 'password' : 'passphrase'}
         </Button>
       </Card>
     </>

@@ -32,26 +32,58 @@ loadDotEnv(path.join(ROOT, '.env'));
 export const DATA_DIR = path.resolve(ROOT, process.env.DATA_DIR ?? '.data');
 export const WORKSPACE_DIR = path.join(DATA_DIR, 'workspace');
 export const TMP_DIR = path.join(DATA_DIR, 'tmp');
-export const DB_PATH = path.join(DATA_DIR, 'blobs.db');
 
 /**
- * Where the agent's memory actually lives.
+ * Where the agent's memory lives: Postgres, normally a Supabase project.
  *
- * Unset      → the local libSQL file inside DATA_DIR (offline, still SQLite).
- * libsql://  → Turso Cloud, authenticated with DB_AUTH_TOKEN.
- * file:…     → a local libSQL file, optionally synced by DB_SYNC_URL.
+ *   DATABASE_URL=postgresql://postgres.<ref>:<pw>@aws-0-<region>.pooler.supabase.com:6543/postgres
+ *
+ * Supabase's pooled connection string is the right one for a long-lived Node
+ * process: it survives the small connection limit of the free tier. Copy it
+ * from Project Settings → Database → Connection string → Connection pooling.
+ *
+ * Unset falls back to a local Postgres for development (`docker compose up -d db`).
  */
-export const DB_URL = process.env.DB_URL ?? process.env.TURSO_DATABASE_URL ?? `file:${DB_PATH}`;
-export const DB_AUTH_TOKEN = process.env.DB_AUTH_TOKEN ?? process.env.TURSO_AUTH_TOKEN ?? '';
-export const DB_SYNC_URL = process.env.DB_SYNC_URL ?? '';
-export const DB_SYNC_SECONDS = Number(process.env.DB_SYNC_SECONDS ?? 30);
+export const DATABASE_URL =
+  process.env.DATABASE_URL ??
+  process.env.SUPABASE_DB_URL ??
+  process.env.POSTGRES_URL ??
+  'postgresql://postgres:postgres@127.0.0.1:5432/blobs';
+
+/** 'require' forces TLS, 'disable' turns it off for a plain local server. */
+export const PG_SSL = process.env.PG_SSL ?? '';
+export const PG_POOL_MAX = Number(process.env.PG_POOL_MAX ?? 10);
+
+/**
+ * Supabase Storage for the agent's file workspace. Optional: without both of
+ * these, workspace files stay on disk under DATA_DIR/workspace.
+ *
+ *   SUPABASE_URL=https://<ref>.supabase.co
+ *   SUPABASE_SERVICE_ROLE_KEY=<Project Settings → API → service_role>
+ *
+ * The service-role key bypasses Row Level Security, so it is only ever used by
+ * the server and is never sent to the browser.
+ */
+export const SUPABASE_URL = (process.env.SUPABASE_URL ?? process.env.NEXT_PUBLIC_SUPABASE_URL ?? '')
+  .trim()
+  .replace(/\/+$/, '');
+export const SUPABASE_SERVICE_ROLE_KEY = (
+  process.env.SUPABASE_SERVICE_ROLE_KEY ?? process.env.SUPABASE_SERVICE_KEY ?? ''
+).trim();
+export const WORKSPACE_BUCKET = process.env.WORKSPACE_BUCKET?.trim() || 'blobs-workspace';
 
 export const PORT = Number(process.env.PORT ?? 3000);
 export const HOST = process.env.HOST ?? '0.0.0.0';
 export const SESSION_DAYS = Number(process.env.SESSION_DAYS ?? 30);
 
 for (const dir of [DATA_DIR, WORKSPACE_DIR, TMP_DIR]) {
-  fs.mkdirSync(dir, { recursive: true });
+  // A container with a read-only or absent disk is fine when workspace files
+  // live in Supabase Storage and BLOBS_SECRET is set; do not fail the boot.
+  try {
+    fs.mkdirSync(dir, { recursive: true });
+  } catch {
+    /* the directory is only needed by the disk-backed workspace and secret.key */
+  }
 }
 
 /**
@@ -68,7 +100,13 @@ function resolveSecret(): Buffer {
     return Buffer.from(fs.readFileSync(keyFile, 'utf8').trim(), 'hex');
   }
   const key = crypto.randomBytes(32);
-  fs.writeFileSync(keyFile, key.toString('hex'), { mode: 0o600 });
+  try {
+    fs.writeFileSync(keyFile, key.toString('hex'), { mode: 0o600 });
+  } catch (error) {
+    throw new Error(
+      `Could not write ${keyFile} (${(error as Error).message}). Set BLOBS_SECRET to a 32+ character random string on hosts without a writable disk.`,
+    );
+  }
   return key;
 }
 

@@ -1,313 +1,132 @@
-import { createClient, type Client } from '@libsql/client';
-import { DB_AUTH_TOKEN, DB_SYNC_SECONDS, DB_SYNC_URL, DB_URL } from './env.ts';
+import fs from 'node:fs';
+import path from 'node:path';
+import { AsyncLocalStorage } from 'node:async_hooks';
+import { Pool, types, type PoolClient, type QueryResultRow } from 'pg';
+import { DATABASE_URL, PG_POOL_MAX, PG_SSL, ROOT } from './env.ts';
 
 /**
- * Data layer. libSQL is used for every environment:
+ * Data layer: one Postgres database, normally a Supabase project.
  *
- *   DB_URL=file:.data/blobs.db              local file (default, offline)
- *   DB_URL=libsql://<db>-<org>.turso.io     Turso Cloud, with DB_AUTH_TOKEN
- *   DB_URL=file:.data/blobs.db + DB_SYNC_URL Turso embedded replica
+ *   DATABASE_URL=postgresql://postgres.<ref>:<password>@aws-0-<region>.pooler.supabase.com:6543/postgres
  *
- * The SQL is plain SQLite: same tables, same FTS5 index, same bm25 ranking.
- * The client is asynchronous because a remote database answers over the
- * network, so every caller awaits.
+ * The rest of the server only knows `all`, `get`, `run`, `count` and `tx`, so
+ * the storage engine is not spread across the codebase. SQL is written with
+ * `?` placeholders, exactly as before, and translated to Postgres `$1…$n`
+ * numbering on the way through (`toPostgres`).
+ *
+ * Two details keep the existing code and its integer-millisecond timestamps
+ * honest:
+ *   * int8/numeric results are parsed into JS numbers, so `row.updated_at`
+ *     arithmetic and `COUNT(*)` both behave like the SQLite driver did;
+ *   * flags stay INTEGER 0/1 in the schema, so `pinned = 1` still works.
  */
-/** Local file + remote primary: reads stay local, writes and pulls sync to Turso. */
-const EMBEDDED = Boolean(DB_SYNC_URL) && DB_URL.startsWith('file:');
+const SCHEMA_FILE = path.join(ROOT, 'supabase', 'migrations', '0001_init.sql');
 
-export const client: Client = EMBEDDED
-  ? createClient({ url: DB_URL, syncUrl: DB_SYNC_URL, authToken: DB_AUTH_TOKEN || undefined })
-  : createClient(DB_AUTH_TOKEN ? { url: DB_URL, authToken: DB_AUTH_TOKEN } : { url: DB_URL });
+/** Timestamps and counts arrive as strings otherwise; the app does maths on them. */
+types.setTypeParser(types.builtins.INT8, (value: string) => Number(value));
+types.setTypeParser(types.builtins.NUMERIC, (value: string) => Number(value));
 
-/** Pull remote changes into the local replica. No-op for a plain file or remote DB. */
-export async function syncNow(): Promise<void> {
-  if (!EMBEDDED) return;
-  await client.sync();
-}
-
-if (EMBEDDED) {
-  const timer = setInterval(() => {
-    void client.sync().catch((error) => console.error('libSQL sync failed:', (error as Error).message));
-  }, Math.max(5, DB_SYNC_SECONDS) * 1_000);
-  timer.unref?.();
-}
-
-const SCHEMA = `
-CREATE TABLE IF NOT EXISTS settings (
-  key TEXT PRIMARY KEY,
-  value TEXT NOT NULL,
-  updated_at INTEGER NOT NULL
-);
-
-CREATE TABLE IF NOT EXISTS secrets (
-  key TEXT PRIMARY KEY,
-  value TEXT NOT NULL,
-  updated_at INTEGER NOT NULL
-);
-
-CREATE TABLE IF NOT EXISTS owner (
-  id INTEGER PRIMARY KEY CHECK (id = 1),
-  name TEXT NOT NULL,
-  passphrase_hash TEXT NOT NULL,
-  salt TEXT NOT NULL,
-  created_at INTEGER NOT NULL
-);
-
-CREATE TABLE IF NOT EXISTS sessions (
-  token_hash TEXT PRIMARY KEY,
-  created_at INTEGER NOT NULL,
-  expires_at INTEGER NOT NULL,
-  last_seen INTEGER NOT NULL
-);
-
-CREATE TABLE IF NOT EXISTS conversations (
-  id TEXT PRIMARY KEY,
-  channel TEXT NOT NULL DEFAULT 'web',
-  title TEXT,
-  summary TEXT,
-  created_at INTEGER NOT NULL,
-  updated_at INTEGER NOT NULL,
-  archived INTEGER NOT NULL DEFAULT 0,
-  meta TEXT
-);
-CREATE INDEX IF NOT EXISTS idx_conversations_updated ON conversations(updated_at DESC);
-
-CREATE TABLE IF NOT EXISTS messages (
-  id TEXT PRIMARY KEY,
-  conversation_id TEXT NOT NULL REFERENCES conversations(id) ON DELETE CASCADE,
-  role TEXT NOT NULL,
-  content TEXT NOT NULL,
-  tool_calls TEXT,
-  tool_call_id TEXT,
-  tool_name TEXT,
-  untrusted INTEGER NOT NULL DEFAULT 0,
-  model TEXT,
-  created_at INTEGER NOT NULL
-);
-CREATE INDEX IF NOT EXISTS idx_messages_conversation ON messages(conversation_id, created_at);
-
-CREATE TABLE IF NOT EXISTS memories (
-  id TEXT PRIMARY KEY,
-  kind TEXT NOT NULL DEFAULT 'fact',
-  content TEXT NOT NULL,
-  tags TEXT NOT NULL DEFAULT '',
-  importance INTEGER NOT NULL DEFAULT 3,
-  source TEXT,
-  pinned INTEGER NOT NULL DEFAULT 0,
-  created_at INTEGER NOT NULL,
-  updated_at INTEGER NOT NULL,
-  last_used_at INTEGER,
-  use_count INTEGER NOT NULL DEFAULT 0
-);
-CREATE INDEX IF NOT EXISTS idx_memories_kind ON memories(kind);
-
-CREATE VIRTUAL TABLE IF NOT EXISTS memories_fts USING fts5(
-  id UNINDEXED,
-  content,
-  tags,
-  tokenize = 'porter unicode61'
-);
-CREATE TRIGGER IF NOT EXISTS memories_ai AFTER INSERT ON memories BEGIN
-  INSERT INTO memories_fts(id, content, tags) VALUES (new.id, new.content, coalesce(new.tags, ''));
-END;
-CREATE TRIGGER IF NOT EXISTS memories_ad AFTER DELETE ON memories BEGIN
-  DELETE FROM memories_fts WHERE id = old.id;
-END;
-CREATE TRIGGER IF NOT EXISTS memories_au AFTER UPDATE ON memories BEGIN
-  DELETE FROM memories_fts WHERE id = old.id;
-  INSERT INTO memories_fts(id, content, tags) VALUES (new.id, new.content, coalesce(new.tags, ''));
-END;
-
-CREATE TABLE IF NOT EXISTS projects (
-  id TEXT PRIMARY KEY,
-  title TEXT NOT NULL,
-  objective TEXT NOT NULL DEFAULT '',
-  status TEXT NOT NULL DEFAULT 'active',
-  notes TEXT NOT NULL DEFAULT '',
-  created_at INTEGER NOT NULL,
-  updated_at INTEGER NOT NULL
-);
-
-CREATE TABLE IF NOT EXISTS tasks (
-  id TEXT PRIMARY KEY,
-  project_id TEXT REFERENCES projects(id) ON DELETE SET NULL,
-  title TEXT NOT NULL,
-  objective TEXT NOT NULL,
-  status TEXT NOT NULL DEFAULT 'queued',
-  autonomy TEXT NOT NULL DEFAULT 'assisted',
-  schedule TEXT,
-  next_run_at INTEGER,
-  last_run_at INTEGER,
-  heartbeat INTEGER,
-  attempts INTEGER NOT NULL DEFAULT 0,
-  max_attempts INTEGER NOT NULL DEFAULT 3,
-  plan TEXT,
-  checkpoint TEXT,
-  result TEXT,
-  error TEXT,
-  origin TEXT NOT NULL DEFAULT 'owner',
-  created_at INTEGER NOT NULL,
-  updated_at INTEGER NOT NULL,
-  completed_at INTEGER
-);
-CREATE INDEX IF NOT EXISTS idx_tasks_status ON tasks(status, next_run_at);
-
-CREATE TABLE IF NOT EXISTS task_steps (
-  id TEXT PRIMARY KEY,
-  task_id TEXT NOT NULL REFERENCES tasks(id) ON DELETE CASCADE,
-  idx INTEGER NOT NULL,
-  description TEXT NOT NULL,
-  status TEXT NOT NULL DEFAULT 'pending',
-  output TEXT,
-  started_at INTEGER,
-  finished_at INTEGER
-);
-CREATE INDEX IF NOT EXISTS idx_task_steps_task ON task_steps(task_id, idx);
-
-CREATE TABLE IF NOT EXISTS responsibilities (
-  id TEXT PRIMARY KEY,
-  project_id TEXT REFERENCES projects(id) ON DELETE SET NULL,
-  title TEXT NOT NULL,
-  objective TEXT NOT NULL DEFAULT '',
-  cadence_minutes INTEGER NOT NULL DEFAULT 1440,
-  status TEXT NOT NULL DEFAULT 'active',
-  last_run_at INTEGER,
-  next_run_at INTEGER,
-  last_outcome TEXT,
-  last_task_id TEXT,
-  run_count INTEGER NOT NULL DEFAULT 0,
-  created_at INTEGER NOT NULL,
-  updated_at INTEGER NOT NULL
-);
-CREATE INDEX IF NOT EXISTS idx_responsibilities_due ON responsibilities(status, next_run_at);
-
-CREATE TABLE IF NOT EXISTS deliverables (
-  id TEXT PRIMARY KEY,
-  task_id TEXT,
-  conversation_id TEXT,
-  responsibility_id TEXT,
-  title TEXT NOT NULL,
-  kind TEXT NOT NULL DEFAULT 'markdown',
-  body TEXT NOT NULL DEFAULT '',
-  public_token TEXT,
-  public_expires_at INTEGER,
-  created_at INTEGER NOT NULL
-);
-CREATE INDEX IF NOT EXISTS idx_deliverables_created ON deliverables(created_at DESC);
-CREATE UNIQUE INDEX IF NOT EXISTS idx_deliverables_token ON deliverables(public_token);
-
-CREATE TABLE IF NOT EXISTS oauth_connections (
-  provider TEXT PRIMARY KEY,
-  account TEXT,
-  scopes TEXT NOT NULL DEFAULT '',
-  access_expires_at INTEGER,
-  connected_at INTEGER NOT NULL
-);
-CREATE TABLE IF NOT EXISTS oauth_states (
-  state TEXT PRIMARY KEY,
-  provider TEXT NOT NULL,
-  client_id TEXT NOT NULL,
-  redirect_uri TEXT NOT NULL,
-  code_verifier TEXT NOT NULL,
-  scopes TEXT NOT NULL DEFAULT '',
-  created_at INTEGER NOT NULL,
-  expires_at INTEGER NOT NULL
-);
-
-CREATE TABLE IF NOT EXISTS approvals (
-  id TEXT PRIMARY KEY,
-  kind TEXT NOT NULL,
-  title TEXT NOT NULL,
-  detail TEXT NOT NULL DEFAULT '',
-  payload TEXT NOT NULL,
-  status TEXT NOT NULL DEFAULT 'pending',
-  task_id TEXT,
-  conversation_id TEXT,
-  created_at INTEGER NOT NULL,
-  decided_at INTEGER,
-  decision_note TEXT
-);
-CREATE INDEX IF NOT EXISTS idx_approvals_status ON approvals(status, created_at DESC);
-
-CREATE TABLE IF NOT EXISTS activity (
-  id TEXT PRIMARY KEY,
-  ts INTEGER NOT NULL,
-  level TEXT NOT NULL DEFAULT 'info',
-  category TEXT NOT NULL DEFAULT 'agent',
-  message TEXT NOT NULL,
-  meta TEXT,
-  task_id TEXT,
-  conversation_id TEXT
-);
-CREATE INDEX IF NOT EXISTS idx_activity_ts ON activity(ts DESC);
-
-CREATE TABLE IF NOT EXISTS integrations (
-  key TEXT PRIMARY KEY,
-  status TEXT NOT NULL DEFAULT 'disconnected',
-  config TEXT,
-  updated_at INTEGER NOT NULL
-);
-
-CREATE TABLE IF NOT EXISTS comms_events (
-  id TEXT PRIMARY KEY,
-  channel TEXT NOT NULL,
-  direction TEXT NOT NULL,
-  peer TEXT,
-  subject TEXT,
-  body TEXT,
-  status TEXT NOT NULL DEFAULT 'logged',
-  external_id TEXT,
-  meta TEXT,
-  created_at INTEGER NOT NULL
-);
-CREATE INDEX IF NOT EXISTS idx_comms_created ON comms_events(created_at DESC);
-
-CREATE TABLE IF NOT EXISTS usage_log (
-  id TEXT PRIMARY KEY,
-  ts INTEGER NOT NULL,
-  provider TEXT NOT NULL,
-  model TEXT NOT NULL,
-  prompt_tokens INTEGER NOT NULL DEFAULT 0,
-  completion_tokens INTEGER NOT NULL DEFAULT 0,
-  ok INTEGER NOT NULL DEFAULT 1,
-  kind TEXT NOT NULL DEFAULT 'chat',
-  task_id TEXT
-);
-CREATE INDEX IF NOT EXISTS idx_usage_ts ON usage_log(ts DESC);
-
-CREATE TABLE IF NOT EXISTS notifications (
-  id TEXT PRIMARY KEY,
-  ts INTEGER NOT NULL,
-  title TEXT NOT NULL,
-  body TEXT NOT NULL DEFAULT '',
-  level TEXT NOT NULL DEFAULT 'info',
-  read INTEGER NOT NULL DEFAULT 0,
-  link TEXT
-);
-CREATE INDEX IF NOT EXISTS idx_notifications_ts ON notifications(ts DESC);
-`;
+const LOCAL_HOSTS = /(^|@)(localhost|127\.0\.0\.1|\[::1\])([:/]|$)/;
 
 /**
- * Schema creation is asynchronous now, so it runs once as `ready`. The server
- * awaits it before accepting traffic; tests and scripts await it too.
+ * Supabase hands out a certificate chain that node can verify, but the pooler
+ * hostname rotates. `rejectUnauthorized: false` is the pragmatic setting here
+ * and is only used off localhost; set PG_SSL=disable for a plain local server.
+ */
+function sslConfig(): { rejectUnauthorized: boolean } | undefined {
+  if (PG_SSL === 'disable') return undefined;
+  if (PG_SSL === 'require') return { rejectUnauthorized: false };
+  return LOCAL_HOSTS.test(DATABASE_URL) ? undefined : { rejectUnauthorized: false };
+}
+
+export const pool = new Pool({
+  connectionString: DATABASE_URL,
+  max: Math.max(1, PG_POOL_MAX),
+  idleTimeoutMillis: 30_000,
+  connectionTimeoutMillis: 15_000,
+  application_name: 'blobs',
+  ssl: sslConfig(),
+});
+
+pool.on('error', (error) => {
+  console.error('Postgres pool error:', error.message);
+});
+
+/* ------------------------------------------------------------------ */
+/* Placeholder translation: `?` → `$1`, `$2`, …                        */
+/* ------------------------------------------------------------------ */
+
+const translated = new Map<string, string>();
+
+/** Rewrites `?` placeholders, leaving quoted literals and identifiers alone. */
+function toPostgres(sql: string): string {
+  const cached = translated.get(sql);
+  if (cached) return cached;
+  let out = '';
+  let index = 0;
+  let quote: "'" | '"' | null = null;
+  for (let i = 0; i < sql.length; i += 1) {
+    const char = sql[i] as string;
+    if (quote) {
+      out += char;
+      if (char === quote) quote = null;
+      continue;
+    }
+    if (char === "'" || char === '"') {
+      quote = char;
+      out += char;
+      continue;
+    }
+    if (char === '?') {
+      index += 1;
+      out += `$${index}`;
+      continue;
+    }
+    out += char;
+  }
+  translated.set(sql, out);
+  return out;
+}
+
+/* ------------------------------------------------------------------ */
+/* Schema bootstrap                                                    */
+/* ------------------------------------------------------------------ */
+
+/**
+ * The schema is created before the server accepts traffic, so a fresh Supabase
+ * database needs nothing but DATABASE_URL. The SQL file is the single source
+ * of truth and is safe to re-run.
  */
 export const ready: Promise<void> = (async () => {
-  if (EMBEDDED) {
-    // A fresh replica has nothing local yet; pull the primary first.
-    await client.sync().catch(() => undefined);
+  if (!fs.existsSync(SCHEMA_FILE)) {
+    throw new Error(`Schema file is missing at ${SCHEMA_FILE}.`);
   }
-  await client.executeMultiple(SCHEMA);
-  try {
-    // Per-connection in a local file; a no-op for a remote database, which
-    // enforces foreign keys server-side.
-    await client.execute('PRAGMA foreign_keys = ON');
-  } catch {
-    /* the server owns this setting when the database is remote */
-  }
-})();
+  const schema = fs.readFileSync(SCHEMA_FILE, 'utf8');
+  await pool.query(schema);
+})().catch((error: Error) => {
+  const hint = LOCAL_HOSTS.test(DATABASE_URL)
+    ? ' Is a local Postgres running on 127.0.0.1:5432 (docker compose up -d db)?'
+    : ' Check DATABASE_URL: Supabase → Project Settings → Database → Connection string → Connection pooling.';
+  throw new Error(`Could not prepare the Postgres schema: ${error.message}.${hint}`);
+});
+
+/* ------------------------------------------------------------------ */
+/* Query helpers                                                       */
+/* ------------------------------------------------------------------ */
 
 type Param = string | number | null;
 export type Row = Record<string, unknown>;
+
+/**
+ * Inside `tx()` every helper call must use the transaction's connection, not a
+ * random one from the pool. AsyncLocalStorage carries it without threading a
+ * client argument through 140 call sites.
+ */
+const scoped = new AsyncLocalStorage<PoolClient>();
+
+function runner(): Pick<PoolClient, 'query'> {
+  return scoped.getStore() ?? pool;
+}
 
 function normalize(params: unknown[]): Param[] {
   return params.map((value) => {
@@ -319,17 +138,17 @@ function normalize(params: unknown[]): Param[] {
 }
 
 export async function all<T = Row>(sql: string, ...params: unknown[]): Promise<T[]> {
-  const result = await client.execute({ sql, args: normalize(params) });
+  const result = await runner().query<QueryResultRow>(toPostgres(sql), normalize(params));
   return result.rows as unknown as T[];
 }
 
 export async function get<T = Row>(sql: string, ...params: unknown[]): Promise<T | null> {
-  const result = await client.execute({ sql, args: normalize(params) });
+  const result = await runner().query<QueryResultRow>(toPostgres(sql), normalize(params));
   return (result.rows[0] as unknown as T) ?? null;
 }
 
 export async function run(sql: string, ...params: unknown[]): Promise<void> {
-  await client.execute({ sql, args: normalize(params) });
+  await runner().query(toPostgres(sql), normalize(params));
 }
 
 export async function count(sql: string, ...params: unknown[]): Promise<number> {
@@ -337,15 +156,35 @@ export async function count(sql: string, ...params: unknown[]): Promise<number> 
   return Number(row?.n ?? 0);
 }
 
-/** Write transaction. libSQL wraps BEGIN/COMMIT so a rollback is guaranteed. */
+/** Write transaction. Everything called inside `fn` runs on one connection. */
 export async function tx<T>(fn: () => Promise<T>): Promise<T> {
-  const transaction = await client.transaction('write');
+  if (scoped.getStore()) return fn();
+  const client = await pool.connect();
   try {
-    const result = await fn();
-    await transaction.commit();
+    await client.query('BEGIN');
+    const result = await scoped.run(client, fn);
+    await client.query('COMMIT');
     return result;
   } catch (error) {
-    await transaction.rollback();
+    await client.query('ROLLBACK').catch(() => undefined);
     throw error;
+  } finally {
+    client.release();
   }
+}
+
+/** Reported by /api/health so a deploy can prove it reached the database. */
+export async function dbStatus(): Promise<{ ok: boolean; detail: string }> {
+  try {
+    const row = await get<{ version: string }>('SELECT version() AS version');
+    const version = String(row?.version ?? '');
+    const match = /PostgreSQL (\d+\.\d+)/.exec(version);
+    return { ok: true, detail: match ? `PostgreSQL ${match[1]}` : 'PostgreSQL' };
+  } catch (error) {
+    return { ok: false, detail: (error as Error).message };
+  }
+}
+
+export async function closeDb(): Promise<void> {
+  await pool.end().catch(() => undefined);
 }

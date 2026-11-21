@@ -1,7 +1,5 @@
-import fs from 'node:fs/promises';
-import path from 'node:path';
 import vm from 'node:vm';
-import { WORKSPACE_DIR } from '../env.ts';
+import { cleanWorkspacePath, listWorkspace, readWorkspaceText, writeWorkspaceText } from '../workspace.ts';
 import type { AutonomyLevel } from '../settings.ts';
 import { getSettings } from '../settings.ts';
 import { get } from '../db.ts';
@@ -145,37 +143,6 @@ async function wikipedia(query: string): Promise<SearchHit[]> {
 /* ------------------------------------------------------------------ */
 /* Workspace files                                                     */
 /* ------------------------------------------------------------------ */
-
-function resolveInWorkspace(raw: string): string {
-  const clean = raw.replace(/\\/g, '/').replace(/^\/+/, '');
-  const resolved = path.resolve(WORKSPACE_DIR, clean);
-  if (!resolved.startsWith(WORKSPACE_DIR + path.sep) && resolved !== WORKSPACE_DIR) {
-    throw new Error('That path is outside the BLOBS workspace.');
-  }
-  return resolved;
-}
-
-async function listWorkspace(dir = '', depth = 2): Promise<string[]> {
-  const root = resolveInWorkspace(dir);
-  const out: string[] = [];
-  async function walk(current: string, level: number): Promise<void> {
-    if (level > depth || out.length > 200) return;
-    const entries = await fs.readdir(current, { withFileTypes: true });
-    for (const entry of entries) {
-      const full = path.join(current, entry.name);
-      const relative = path.relative(WORKSPACE_DIR, full);
-      if (entry.isDirectory()) {
-        out.push(`${relative}/`);
-        await walk(full, level + 1);
-      } else {
-        const stat = await fs.stat(full).catch(() => null);
-        out.push(`${relative} (${stat ? Math.ceil(stat.size / 1024) : '?'} KB)`);
-      }
-    }
-  }
-  await walk(root, 0);
-  return out;
-}
 
 /* ------------------------------------------------------------------ */
 /* Sandboxed JavaScript                                                */
@@ -382,14 +349,13 @@ export const TOOLS: ToolDef[] = [
     risk: 'low',
     category: 'files',
     async run(args) {
-      const target = resolveInWorkspace(str(args, 'path') || 'notes/untitled.md');
-      await fs.mkdir(path.dirname(target), { recursive: true });
-      await fs.writeFile(target, str(args, 'content'), 'utf8');
+      const relative = cleanWorkspacePath(str(args, 'path') || 'notes/untitled.md');
+      await writeWorkspaceText(relative, str(args, 'content'));
       return {
         ok: true,
-        content: `Wrote ${path.relative(WORKSPACE_DIR, target)}.`,
-        summary: `Wrote note ${path.relative(WORKSPACE_DIR, target)}.`,
-        display: { path: path.relative(WORKSPACE_DIR, target) },
+        content: `Wrote ${relative}.`,
+        summary: `Wrote note ${relative}.`,
+        display: { path: relative },
       };
     },
   },
@@ -425,15 +391,14 @@ export const TOOLS: ToolDef[] = [
     risk: 'low',
     category: 'files',
     async run(args) {
-      const target = resolveInWorkspace(str(args, 'path'));
-      const stat = await fs.stat(target).catch(() => null);
-      if (!stat || !stat.isFile()) return { ok: false, content: 'No such file.', summary: 'Read failed: file missing.' };
-      const text = await fs.readFile(target, 'utf8');
+      const relative = cleanWorkspacePath(str(args, 'path'));
+      const text = await readWorkspaceText(relative);
+      if (text === null) return { ok: false, content: 'No such file.', summary: 'Read failed: file missing.' };
       return {
         ok: true,
         untrusted: true,
         content: truncate(text, num(args, 'max_chars', 8000)),
-        summary: `Read ${path.relative(WORKSPACE_DIR, target)}.`,
+        summary: `Read ${relative}.`,
       };
     },
   },
@@ -1171,10 +1136,6 @@ export function approvalCategory(tool: ToolDef): RiskKey {
 }
 
 export const TOOL_NAMES = TOOLS.map((tool) => tool.name);
-
-export function workspaceRoot(): string {
-  return WORKSPACE_DIR;
-}
 
 export function toolCount(): number {
   return TOOLS.length;

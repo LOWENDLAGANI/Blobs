@@ -1,0 +1,10 @@
+node_modules
+web/dist
+.data
+.daytona.json
+.env
+.env.local
+.git
+*.log
+.DS_Store
+.data/backups

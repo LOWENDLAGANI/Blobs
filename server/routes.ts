@@ -2,19 +2,23 @@ import type { FastifyInstance, FastifyReply, FastifyRequest } from 'fastify';
 import { APP_VERSION } from './env.ts';
 import { all, get, run } from './db.ts';
 import {
+  authMode,
+  changeOwnerPassword,
   changePassphrase,
   clearSessionCookie,
   createOwner,
   createSession,
   destroySession,
-  getOwner,
+  getOwnerIdentity,
   isAuthed,
   isSameOrigin,
   loginAllowed,
   ownerExists,
   recordFailedLogin,
+  registerOwnerWithEmail,
   sessionToken,
   setSessionCookie,
+  verifyOwnerPassword,
   verifyPassphrase,
 } from './auth.ts';
 import {
@@ -120,6 +124,8 @@ import {
 import { machinesStatus } from './host.ts';
 import fs from 'node:fs';
 import { clamp, now, truncate } from './util.ts';
+import { dbStatus } from './db.ts';
+import { workspaceBackend } from './workspace.ts';
 
 const PUBLIC_PATHS = new Set([
   '/api/health',
@@ -188,19 +194,27 @@ export async function registerRoutes(app: FastifyInstance): Promise<void> {
 
   /* ---------------- health & auth ---------------- */
 
-  app.get('/api/health', async () => ({
-    ok: true,
-    version: APP_VERSION,
-    setupRequired: !await ownerExists(),
-    uptime: Math.round(process.uptime()),
-  }));
+  app.get('/api/health', async () => {
+    const database = await dbStatus();
+    return {
+      ok: database.ok,
+      version: APP_VERSION,
+      database,
+      workspace: workspaceBackend(),
+      setupRequired: !await ownerExists(),
+      uptime: Math.round(process.uptime()),
+    };
+  });
 
   app.get('/api/auth/state', async (request) => {
     const settings = getSettings();
+    const identity = await getOwnerIdentity();
     return {
       setupRequired: !await ownerExists(),
       authed: await isAuthed(request),
-      ownerName: (await getOwner())?.name ?? null,
+      mode: authMode(),
+      ownerName: settings.owner.name,
+      ownerEmail: identity?.email ?? null,
       companionName: settings.companion.name,
       tagline: settings.companion.tagline,
     };
@@ -208,12 +222,23 @@ export async function registerRoutes(app: FastifyInstance): Promise<void> {
 
   app.post('/api/auth/setup', async (request, reply) => {
     if (await ownerExists()) return bad(reply, 'An owner is already configured.', 409);
-    const body = (request.body ?? {}) as { name?: string; passphrase?: string };
-    if (!body.passphrase || body.passphrase.length < 8) {
-      return bad(reply, 'Choose a passphrase with at least 8 characters.');
+    const body = (request.body ?? {}) as { name?: string; email?: string; password?: string; passphrase?: string };
+    const name = (body.name ?? '').trim() || 'Owner';
+    if (authMode() === 'supabase') {
+      if (!body.email || !body.password) return bad(reply, 'Enter an email address and a password.');
+      if (body.password.length < 8) return bad(reply, 'Choose a password with at least 8 characters.');
+      try {
+        await registerOwnerWithEmail(body.email, body.password);
+      } catch (error) {
+        return bad(reply, (error as Error).message);
+      }
+    } else {
+      if (!body.passphrase || body.passphrase.length < 8) {
+        return bad(reply, 'Choose a passphrase with at least 8 characters.');
+      }
+      await createOwner(name, body.passphrase);
     }
-    await createOwner(body.name ?? 'Owner', body.passphrase);
-    await saveSettings({ owner: { name: (body.name ?? 'Owner').trim() || 'Owner' } });
+    await saveSettings({ owner: { name } });
     const token = await createSession();
     setSessionCookie(reply, token);
     logActivity({ level: 'info', category: 'system', message: 'BLOBS was initialised by its owner.' });
@@ -222,12 +247,26 @@ export async function registerRoutes(app: FastifyInstance): Promise<void> {
   });
 
   app.post('/api/auth/login', async (request, reply) => {
-    const body = (request.body ?? {}) as { passphrase?: string };
+    const body = (request.body ?? {}) as { email?: string; password?: string; passphrase?: string };
     const ip = request.ip;
     if (!loginAllowed(ip)) return bad(reply, 'Too many attempts. Wait a minute and try again.', 429);
-    if (!body.passphrase || !await verifyPassphrase(body.passphrase)) {
+
+    let ok = false;
+    try {
+      ok =
+        authMode() === 'supabase'
+          ? Boolean(body.email && body.password) && (await verifyOwnerPassword(body.email ?? '', body.password ?? ''))
+          : Boolean(body.passphrase) && (await verifyPassphrase(body.passphrase ?? ''));
+    } catch (error) {
+      return bad(reply, `Sign-in is unavailable right now: ${(error as Error).message}`, 502);
+    }
+    if (!ok) {
       recordFailedLogin(ip);
-      return bad(reply, 'That passphrase is not correct.', 401);
+      return bad(
+        reply,
+        authMode() === 'supabase' ? 'That email and password do not match.' : 'That passphrase is not correct.',
+        401,
+      );
     }
     const token = await createSession();
     setSessionCookie(reply, token);
@@ -240,11 +279,16 @@ export async function registerRoutes(app: FastifyInstance): Promise<void> {
     return { ok: true };
   });
 
-  app.post('/api/auth/passphrase', async (request, reply) => {
+  app.post('/api/auth/password', async (request, reply) => {
     const body = (request.body ?? {}) as { current?: string; next?: string };
     try {
-      changePassphrase(body.current ?? '', body.next ?? '');
-      logActivity({ level: 'warn', category: 'security', message: 'Owner passphrase changed; all sessions signed out.' });
+      if (authMode() === 'supabase') await changeOwnerPassword(body.current ?? '', body.next ?? '');
+      else await changePassphrase(body.current ?? '', body.next ?? '');
+      logActivity({
+        level: 'warn',
+        category: 'security',
+        message: authMode() === 'supabase' ? 'Owner password changed; all sessions signed out.' : 'Owner passphrase changed; all sessions signed out.',
+      });
       return { ok: true };
     } catch (error) {
       return bad(reply, (error as Error).message);
@@ -975,15 +1019,19 @@ export async function registerRoutes(app: FastifyInstance): Promise<void> {
 
   /* ---------------- settings ---------------- */
 
-  app.get('/api/settings', async () => ({
-    settings: getSettings(),
-    defaults: DEFAULT_SETTINGS,
-    providers: await providerCatalog(),
-    providerNotes: Object.fromEntries(Object.entries(PROVIDERS).map(([key, value]) => [key, value.note])),
-    usage: await usageSummary(),
-    secrets: { hasEmailPassword: await getSecret('email:password') !== null, hasPhoneToken: await getSecret('phone:authToken') !== null },
-    version: APP_VERSION,
-  }));
+  app.get('/api/settings', async () => {
+    const identity = await getOwnerIdentity();
+    return {
+      settings: getSettings(),
+      defaults: DEFAULT_SETTINGS,
+      providers: await providerCatalog(),
+      providerNotes: Object.fromEntries(Object.entries(PROVIDERS).map(([key, value]) => [key, value.note])),
+      usage: await usageSummary(),
+      secrets: { hasEmailPassword: await getSecret('email:password') !== null, hasPhoneToken: await getSecret('phone:authToken') !== null },
+      auth: { mode: authMode(), email: identity?.email ?? null },
+      version: APP_VERSION,
+    };
+  });
 
   app.patch('/api/settings', async (request) => {
     const saved = await saveSettings(request.body ?? {});

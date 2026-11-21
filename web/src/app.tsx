@@ -15,10 +15,14 @@ import { SettingsPage } from './pages/settings.tsx';
 
 type Route = 'console' | 'tasks' | 'review' | 'projects' | 'memory' | 'activity' | 'comms' | 'integrations' | 'settings';
 
+type AuthMode = 'supabase' | 'passphrase';
+
 interface AuthState {
   setupRequired: boolean;
   authed: boolean;
+  mode: AuthMode;
   ownerName: string | null;
+  ownerEmail: string | null;
   companionName: string;
   tagline: string;
 }
@@ -62,7 +66,7 @@ export function App() {
       const state = await api<AuthState>('/api/auth/state');
       setAuth(state);
     } catch {
-      setAuth({ setupRequired: false, authed: false, ownerName: null, companionName: 'BLOBS', tagline: 'Your personal agent' });
+      setAuth({ setupRequired: false, authed: false, mode: 'passphrase', ownerName: null, ownerEmail: null, companionName: 'BLOBS', tagline: 'Your personal agent' });
     }
   }, []);
 
@@ -93,7 +97,7 @@ export function App() {
   if (auth.setupRequired) {
     return (
       <ToastProvider>
-        <SetupScreen onDone={reloadAuth} />
+        <SetupScreen mode={auth.mode} onDone={reloadAuth} />
       </ToastProvider>
     );
   }
@@ -101,7 +105,7 @@ export function App() {
   if (!auth.authed) {
     return (
       <ToastProvider>
-        <LoginScreen companionName={auth.companionName} onDone={reloadAuth} />
+        <LoginScreen companionName={auth.companionName} mode={auth.mode} onDone={reloadAuth} />
       </ToastProvider>
     );
   }
@@ -117,21 +121,24 @@ export function App() {
 /* Screens                                                             */
 /* ------------------------------------------------------------------ */
 
-function SetupScreen({ onDone }: { onDone: () => Promise<void> }) {
+function SetupScreen({ mode, onDone }: { mode: AuthMode; onDone: () => Promise<void> }) {
   const toast = useToast();
   const [name, setName] = useState('');
-  const [passphrase, setPassphrase] = useState('');
+  const [email, setEmail] = useState('');
+  const [secret, setSecret] = useState('');
   const [confirm, setConfirm] = useState('');
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState('');
+  const emailMode = mode === 'supabase';
 
   const submit = async (): Promise<void> => {
-    if (passphrase.length < 8) return setError('Use at least 8 characters for the passphrase.');
-    if (passphrase !== confirm) return setError('The two passphrases do not match.');
+    if (emailMode && !/^\S+@\S+\.\S+$/.test(email.trim())) return setError('Enter a valid email address.');
+    if (secret.length < 8) return setError(`Use at least 8 characters for the ${emailMode ? 'password' : 'passphrase'}.`);
+    if (secret !== confirm) return setError(emailMode ? 'The two passwords do not match.' : 'The two passphrases do not match.');
     setBusy(true);
     setError('');
     try {
-      await post('/api/auth/setup', { name, passphrase });
+      await post('/api/auth/setup', emailMode ? { name, email: email.trim(), password: secret } : { name, passphrase: secret });
       toast('BLOBS is ready.', 'good');
       await onDone();
     } catch (err) {
@@ -150,21 +157,30 @@ function SetupScreen({ onDone }: { onDone: () => Promise<void> }) {
         <p className="eyebrow">First run</p>
         <h1>Meet BLOBS</h1>
         <p className="lede">
-          One continuous agent with its own memory, tasks and voice. This passphrase protects the whole control centre — it is
-          hashed on the server and never leaves it.
+          {emailMode
+            ? 'One continuous agent with its own memory, tasks and voice. Sign in with an email and password, handled by Supabase Auth so you can reach it from any device.'
+            : 'One continuous agent with its own memory, tasks and voice. This passphrase protects the whole control centre — it is hashed on the server and never leaves it.'}
         </p>
         <Field label="What should BLOBS call you?">
-          <Input value={name} onChange={(event) => setName(event.target.value)} placeholder="Your name" autoFocus />
+          <Input value={name} onChange={(event) => setName(event.target.value)} placeholder="Your name" autoFocus={!emailMode} />
         </Field>
-        <Field label="Owner passphrase" hint="At least 8 characters. There is no recovery, so store it well.">
+        {emailMode && (
+          <Field label="Owner email">
+            <Input type="email" value={email} onChange={(event) => setEmail(event.target.value)} placeholder="you@example.com" autoFocus />
+          </Field>
+        )}
+        <Field
+          label={emailMode ? 'Password' : 'Owner passphrase'}
+          hint="At least 8 characters. There is no recovery, so store it well."
+        >
           <Input
             type="password"
-            value={passphrase}
-            onChange={(event) => setPassphrase(event.target.value)}
+            value={secret}
+            onChange={(event) => setSecret(event.target.value)}
             placeholder="••••••••"
           />
         </Field>
-        <Field label="Repeat passphrase">
+        <Field label={emailMode ? 'Repeat password' : 'Repeat passphrase'}>
           <Input type="password" value={confirm} onChange={(event) => setConfirm(event.target.value)} onKeyDown={(e) => e.key === 'Enter' && void submit()} />
         </Field>
         {error && <p className="form-error">{error}</p>}
@@ -176,16 +192,18 @@ function SetupScreen({ onDone }: { onDone: () => Promise<void> }) {
   );
 }
 
-function LoginScreen({ companionName, onDone }: { companionName: string; onDone: () => Promise<void> }) {
-  const [passphrase, setPassphrase] = useState('');
+function LoginScreen({ companionName, mode, onDone }: { companionName: string; mode: AuthMode; onDone: () => Promise<void> }) {
+  const [email, setEmail] = useState('');
+  const [secret, setSecret] = useState('');
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState('');
+  const emailMode = mode === 'supabase';
 
   const submit = async (): Promise<void> => {
     setBusy(true);
     setError('');
     try {
-      await post('/api/auth/login', { passphrase });
+      await post('/api/auth/login', emailMode ? { email: email.trim(), password: secret } : { passphrase: secret });
       await onDone();
     } catch (err) {
       setError((err as Error).message);
@@ -200,13 +218,24 @@ function LoginScreen({ companionName, onDone }: { companionName: string; onDone:
         <div className="orb-static orb-small" />
         <h1>{companionName}</h1>
         <p className="lede">Sign in to your agent.</p>
-        <Field label="Owner passphrase">
+        {emailMode && (
+          <Field label="Email">
+            <Input
+              type="email"
+              value={email}
+              onChange={(event) => setEmail(event.target.value)}
+              placeholder="you@example.com"
+              autoFocus
+            />
+          </Field>
+        )}
+        <Field label={emailMode ? 'Password' : 'Owner passphrase'}>
           <Input
             type="password"
-            value={passphrase}
-            onChange={(event) => setPassphrase(event.target.value)}
+            value={secret}
+            onChange={(event) => setSecret(event.target.value)}
             onKeyDown={(event) => event.key === 'Enter' && void submit()}
-            autoFocus
+            autoFocus={!emailMode}
             placeholder="••••••••"
           />
         </Field>

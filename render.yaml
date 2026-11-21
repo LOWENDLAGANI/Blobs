@@ -1,0 +1,33 @@
+# One-command deployment to Render, backed by Supabase.
+#
+# Fill in the two sets of Supabase values in the Render dashboard (or paste
+# them here): the pooled Postgres connection string and, optionally, the
+# Storage credentials. With Storage configured no disk is needed at all.
+# Without it, add the disk block below so workspace files survive a redeploy.
+services:
+  - type: web
+    name: blobs
+    runtime: docker
+    dockerfilePath: ./Dockerfile
+    plan: starter
+    healthCheckPath: /api/health
+    # Uncomment if you leave Supabase Storage unconfigured (workspace files on disk).
+    # disk:
+    #   name: blobs-data
+    #   mountPath: /data
+    #   sizeGB: 1
+    envVars:
+      - key: DATABASE_URL
+        sync: false
+      - key: SUPABASE_URL
+        sync: false
+      - key: SUPABASE_SERVICE_ROLE_KEY
+        sync: false
+      - key: BLOBS_SECRET
+        generateValue: true
+      - key: NODE_ENV
+        value: production
+      - key: PORT
+        value: 3000
+      - key: DATA_DIR
+        value: /tmp/blobs

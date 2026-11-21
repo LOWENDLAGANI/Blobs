@@ -2,7 +2,8 @@ import fs from 'node:fs/promises';
 import path from 'node:path';
 import { Sandbox } from 'e2b';
 import { Sandbox as DesktopSandbox } from '@e2b/desktop';
-import { DATA_DIR, WORKSPACE_DIR } from '../env.ts';
+import { DATA_DIR } from '../env.ts';
+import { cleanWorkspacePath, readWorkspaceBytes, writeWorkspaceBytes } from '../workspace.ts';
 import { get, run } from '../db.ts';
 import { getSecret, getSettings, setSecret } from '../settings.ts';
 import { now, safeJson, truncate } from '../util.ts';
@@ -361,15 +362,6 @@ export async function sandboxFiles(action: ComputerAction, options: {
   }
 }
 
-function resolveWorkspace(raw: string): string {
-  const clean = raw.replace(/\\/g, '/').replace(/^\/+/, '');
-  const resolved = path.resolve(WORKSPACE_DIR, clean);
-  if (!resolved.startsWith(WORKSPACE_DIR + path.sep) && resolved !== WORKSPACE_DIR) {
-    throw new Error('That workspace path is outside the BLOBS workspace.');
-  }
-  return resolved;
-}
-
 export async function transferFile(
   direction: 'download' | 'upload',
   sandboxPath: string,
@@ -377,19 +369,18 @@ export async function transferFile(
 ): Promise<string> {
   const sandbox = await getCodeSandbox();
   try {
+    const relative = cleanWorkspacePath(workspacePath);
     if (direction === 'download') {
       const bytes = await sandbox.files.read(sandboxPath, { format: 'bytes' });
       if (bytes.byteLength > MAX_FILE_BYTES) throw new Error('That file is larger than 2 MB.');
-      const local = resolveWorkspace(workspacePath);
-      await fs.mkdir(path.dirname(local), { recursive: true });
-      await fs.writeFile(local, bytes);
-      return `Saved ${sandboxPath} to the BLOBS workspace as ${workspacePath} (${bytes.byteLength} bytes).`;
+      await writeWorkspaceBytes(relative, bytes);
+      return `Saved ${sandboxPath} to the BLOBS workspace as ${relative} (${bytes.byteLength} bytes).`;
     }
-    const local = resolveWorkspace(workspacePath);
-    const bytes = await fs.readFile(local);
+    const bytes = await readWorkspaceBytes(relative);
+    if (!bytes) throw new Error('That file is not in the BLOBS workspace.');
     if (bytes.byteLength > MAX_FILE_BYTES) throw new Error('That file is larger than 2 MB.');
     await sandbox.files.write(sandboxPath, bytes);
-    return `Uploaded ${workspacePath} to ${sandboxPath} (${bytes.byteLength} bytes).`;
+    return `Uploaded ${relative} to ${sandboxPath} (${bytes.byteLength} bytes).`;
   } catch (error) {
     throw friendlyError(error);
   }

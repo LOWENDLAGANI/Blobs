@@ -7,14 +7,14 @@ watch and steer it.
 It acts on its own. Voice and chat are the whole interface: there is no approval prompt, card or manual gate between
 what BLOBS decides and what it does.
 
-Built to run on a free tier first: browser-native voice, free web research, SQLite (on disk or in Turso Cloud), and a
-model layer you can point at Gemini's free tier, a small DeepSeek top-up, or any OpenAI-compatible endpoint.
+Built to run on a free tier first: browser-native voice, free web research, Supabase Postgres as the whole backend, and
+a model layer you can point at Gemini's free tier, a small DeepSeek top-up, or any OpenAI-compatible endpoint.
 
 ```
 ┌──────────────────────────────┐        ┌──────────────────────────────────────────┐
 │  Web control centre (React)  │  SSE   │  Agent server (Node + Fastify)            │
 │  voice · chat · tasks · mem  │◄──────►│  provider adapter · autonomous tool loop   │
-└──────────────────────────────┘        │  task engine · scheduler · libSQL → Turso  │
+└──────────────────────────────┘        │  task engine · scheduler · pg → Supabase  │
                                         └───────────────┬──────────────────────────┘
                                                         │
                              DeepSeek / Gemini / Groq / OpenRouter / Ollama / custom
@@ -24,7 +24,8 @@ model layer you can point at Gemini's free tier, a small DeepSeek top-up, or any
 
 ## Quick start
 
-Requires **Node 22.6+**. The database driver is libSQL, which ships prebuilt binaries — nothing to compile.
+Requires **Node 22.6+** and Postgres — a Supabase project is the intended backend, and its pooled connection string is
+the only database setting there is.
 
 ```bash
 npm install
@@ -32,8 +33,13 @@ npm run build
 npm start            # http://localhost:3000
 ```
 
-On first open you choose an owner passphrase. That single passphrase protects the control centre; it is scrypt-hashed
-on the server, and sessions are http-only cookies.
+Set `DATABASE_URL` first (see [Backend: Supabase Postgres](#backend-supabase-postgres)); the schema is applied on
+boot. No Supabase project yet? `docker compose up -d db` starts a local Postgres and the default URL already points at
+it.
+
+On first open you choose how the control centre is protected. With Supabase configured that is an email and password
+through Supabase Auth, so you can sign in from any device; without it, it is a single owner passphrase, scrypt-hashed on
+the server. Either way sessions are http-only cookies.
 
 Then, in **Settings → Intelligence**, pick a provider and paste a key. Nothing else is required to start talking.
 
@@ -44,48 +50,51 @@ npm run dev          # API on :8787
 npm run web          # Vite UI on :3000, proxying /api
 ```
 
-## Where memory lives: local file or Turso
+## Backend: Supabase Postgres
 
-BLOBS keeps everything — memory, conversations, tasks, settings — in one SQLite schema. The client speaks
-libSQL, so the same code runs against a file on the server or a Turso Cloud database across the network.
-
-```bash
-# 1. local file (default, works offline, nothing to sign up for)
-DB_URL=file:.data/blobs.db
-
-# 2. Turso Cloud — memory survives a lost, rebuilt or replaced server
-turso auth login                          # once
-turso db create blobs
-turso db show blobs --url                 # → libsql://blobs-<org>.turso.io
-
-DB_URL=libsql://blobs-<org>.turso.io
-DB_AUTH_TOKEN=<token from `turso db tokens create blobs`>
-```
-
-Moving an existing local agent to Turso is a dump and an import, not a rewrite:
+BLOBS keeps everything — memory, conversations, tasks, settings, sessions and activity — in one Postgres schema. The
+server talks to it with `pg` over a single `DATABASE_URL`, so no data is trapped on a container's disk.
 
 ```bash
-turso db shell blobs < <(sqlite3 .data/blobs.db .dump)   # or: turso db import blobs .data/blobs.db
+# 1. create a project at supabase.com
+# 2. Project Settings → Database → Connection string → Connection pooling
+DATABASE_URL=postgresql://postgres.<ref>:<password>@aws-0-<region>.pooler.supabase.com:6543/postgres
+
+npm install && npm run build && npm start
 ```
 
-**Embedded replica** is the best of both: reads hit a local file at disk speed, writes go to Turso, and the replica
-pulls the rest on an interval. If the machine dies, the cloud copy is the source of truth.
-
-```bash
-DB_URL=file:.data/blobs.db
-DB_SYNC_URL=libsql://blobs-<org>.turso.io
-DB_AUTH_TOKEN=<token>
-DB_SYNC_SECONDS=30
-```
+That is the whole database setup. On boot the server applies
+[`supabase/migrations/0001_init.sql`](supabase/migrations/0001_init.sql), which is idempotent: a brand-new project
+bootstraps itself and re-running it is harmless. You can also paste that file into the Supabase SQL editor if you would
+rather create everything up front.
 
 Notes that matter in practice:
 
-- The schema and the memory ranking are unchanged: the `memories` table, the FTS5 index with the `porter` tokenizer,
-the three sync triggers and `bm25(memories_fts, 1.0, 0.4)` all run on libSQL and Turso Cloud as-is.
-- Turso's Free plan (100 databases, 5 GB, 500M rows read/month) is far beyond one owner's usage.
-- `.data/secret.key` (or `BLOBS_SECRET`) encrypts stored integration keys and is deliberately **not** part of the
-database. If you restore onto a new machine, either copy that key or re-enter the integration credentials.
-- The server awaits schema creation before it accepts traffic, so a fresh Turso database bootstraps itself on first run.
+- **Use the pooled string** (port `6543`). It is built for a long-lived Node process and stays inside the free tier's
+  connection limit. The direct string (port `5432`) also works but is IPv6-only on newer projects and caps out sooner.
+- **Full-text search** moved with the database: the FTS5 virtual table and its three triggers are gone, replaced by a
+  GIN index over an immutable `to_tsvector('english', …)` expression, scored with `ts_rank`. The hybrid ranking in
+  `server/memory.ts` — relevance, importance, pinning, recency — is unchanged.
+- **Timestamps are still integer milliseconds** (`bigint`) and flags are still `integer` 0/1, so date arithmetic and
+  comparisons behave exactly as they did before the swap.
+- **`.data/secret.key` is deliberately not in the database.** It encrypts the integration keys that *are* stored there.
+  Set `BLOBS_SECRET` (32+ characters) on your host, or keep `DATA_DIR` on a volume; lose it and the stored provider and
+  integration credentials must be re-entered.
+- **Sessions live in Postgres**, so signing in on a phone and a laptop both work and a restart never logs you out.
+- **Email sign-in replaces the owner passphrase** when `SUPABASE_URL` and `SUPABASE_SERVICE_ROLE_KEY` are set. On first
+  open you enter an email and a password; BLOBS creates the account through the Supabase Auth admin API and records only
+  the address — the password is never stored in your database. Later sign-ins are checked against Supabase Auth, and
+  BLOBS still issues its own http-only session cookie, so every route, CSRF check and session rule is unchanged. An
+  existing passphrase install is asked to enrol an email once; memory, tasks and settings are untouched. Leave the two
+  variables unset to keep the passphrase.
+- **Workspace files can live in Supabase Storage too.** Set `SUPABASE_URL` and `SUPABASE_SERVICE_ROLE_KEY` (Project
+  Settings → API) and notes, downloads and sandbox transfers go to a private `blobs-workspace` bucket created on first
+  use. The host then needs no disk at all, and files survive every redeploy. Leave them unset and they stay in
+  `DATA_DIR/workspace`. The service-role key is used server-side only and never reaches the browser.
+- **No Supabase keys reach the browser.** The anon and service-role keys are not used at all: the app connects to
+  Postgres directly from the server. Row Level Security is therefore not the security boundary here — the owner
+  passphrase, the http-only session cookie and same-origin checks are. Treat `DATABASE_URL` as a server-side secret.
+- The free tier (500 MB, shared CPU) is far beyond one owner's usage of this app.
 
 ## Models: what is actually free
 
@@ -127,7 +136,7 @@ of pretending.
 
 ## Memory
 
-- Stored in SQLite with an FTS5 index.
+- Stored in Postgres with a GIN full-text index.
 - Retrieval is hybrid: BM25 relevance, blended with importance, pinning and recency, then injected into the system
   prompt only when relevant. The whole history is never dumped in.
 - Written three ways: the owner adds it manually, BLOBS decides to save something with the `remember` tool, and long
@@ -151,9 +160,35 @@ The scheduler runs inside the server, not the browser. That is verified by the s
 watches it complete with no client attached.
 
 Hosting note: this needs a process with a persistent disk. It runs on a small VPS, a home server, or a container host
-with a volume. It is **not** deployable to Cloudflare Workers/Sites, which cannot run a Node server or keep SQLite on
-disk. Free 24/7 hosting with a persistent volume is increasingly rare — plan for either a ~$2–5/month instance or a
+with a volume. It is **not** deployable to Cloudflare Workers/Sites, which cannot run a long-lived Node process. Free 24/7 hosting with a persistent volume is increasingly rare — plan for either a ~$2–5/month instance or a
 machine you own. The app never silently upgrades itself to a paid service.
+
+## Deployment: any container host (Docker)
+
+The app is one Node process plus a static build, so a single image runs anywhere — Railway, Render, Fly.io, a VPS, or
+your own machine. `render.yaml` is a ready blueprint and `docker-compose.yml` runs the whole stack locally.
+
+```bash
+docker build -t blobs .
+docker run -p 3000:3000 -v blobs-data:/data \
+  -e DATABASE_URL='postgresql://…pooler.supabase.com:6543/postgres' \
+  -e BLOBS_SECRET='a-long-random-string' \
+  blobs
+```
+
+Then open `http://localhost:3000` or the host's public URL. `GET /api/health` reports the version and whether the app
+reached Postgres; that is the endpoint the Render health check uses.
+
+What the host has to provide:
+
+- **`DATABASE_URL`** — the Supabase pooled connection string. The database itself needs no disk.
+- **`SUPABASE_URL` + `SUPABASE_SERVICE_ROLE_KEY`** — moves the file workspace into Supabase Storage, so the host needs no
+  disk. Without them, workspace files go to `DATA_DIR` and a volume is required. Either way, set `BLOBS_SECRET` so the
+  encryption key does not have to live on disk.
+- **One always-on process.** The scheduler that executes background tasks runs inside the server. Serverless functions
+  and free tiers that sleep when idle are the wrong shape: a sleeping BLOBS cannot run its tasks. Render's free
+  instance spins down and has no disk, which is why the blueprint asks for the smallest paid instance.
+- **One instance, not several.** The scheduler assumes a single worker; extra replicas would claim the same tasks.
 
 ## Deployment: a Daytona sandbox that stays awake
 
@@ -191,7 +226,7 @@ What to keep in mind:
   wall-clock timeout can still apply — check Daytona's pricing and lifecycle defaults before leaving it up. To keep the
   quiet hours free, stop it from your own cron (`0 1 * * * cd /path/to/Blobs && node scripts/daytona.ts stop`) and
   start it again in the morning (`0 8 * * *`). Scheduled tasks do not run while the sandbox is stopped.
-- The disk survives `stop`/`start`, not `destroy`. For memory that outlives the sandbox, point `DB_URL` at Turso (above)
+- The disk survives `stop`/`start`, not `destroy`. For memory that outlives the sandbox, point `DATABASE_URL` at Supabase (above)
   or keep a copy of `.data/`.
 - Your local `.env` is read at deploy time and passed to the remote server process. It is not uploaded as a file, and
   `DAYTONA_API_KEY` is filtered out so the hosting credential never enters the sandbox.
@@ -237,7 +272,7 @@ use separate keys (`DAYTONA_API_KEY` for the host, `E2B_API_KEY` for the compute
 provider, and the Daytona key is never placed in the E2B environment.
 
 Connect it in **Integrations → Cloud computer** with an E2B API key. Sandboxes are created on first use, their ids are
-stored in SQLite, and later actions reconnect (auto-resuming a paused sandbox) so work continues on the same machine.
+stored in Postgres, and later actions reconnect (auto-resuming a paused sandbox) so work continues on the same machine.
 
 - **Shell:** `run_shell` for git, curl, compilers, scripts — up to two minutes per command.
 - **Code:** `run_code` writes and executes Python, JavaScript or Bash, returning stdout, stderr and the exit code.
@@ -287,7 +322,9 @@ BLOBS is **autonomous-first**. Voice and chat are the front door, and no screen 
 
 ## Security model
 
-- Single owner, scrypt-hashed passphrase, http-only session cookie, login throttling.
+- Single owner. With Supabase Auth configured the password lives in Supabase and sign-in is verified server-side; without
+  it the passphrase is scrypt-hashed locally. Either way the session is an http-only cookie, logins are throttled, and no
+  credential is ever stored in plaintext or sent to the browser.
 - Mutating requests must be same-origin (CSRF), and secrets are encrypted at rest.
 - All API routes except health, auth and the signed Twilio webhook require a session.
 - The Twilio webhook requires a per-install secret in the query string.
@@ -298,7 +335,7 @@ BLOBS is **autonomous-first**. Voice and chat are the front door, and no screen 
 ## Verification
 
 ```bash
-npm run smoke        # 27 end-to-end checks against a throwaway database
+npm run smoke        # 27 end-to-end checks against a throwaway local database (blobs_smoke)
 node scripts/tools-check.ts   # live web research, files, sandbox, SSRF guard
 npx tsc --noEmit
 npm run build
@@ -315,12 +352,14 @@ workspace sandbox, the JS sandbox, and that computer tools refuse cleanly when E
 server/
   index.ts            Fastify bootstrap, static SPA, scheduler start
   routes.ts           all HTTP + SSE endpoints
-  db.ts               SQLite schema and helpers
+  db.ts               Postgres pool, ?→$n translation, schema bootstrap
+  workspace.ts        agent file workspace: Supabase Storage, or disk when unconfigured
   auth.ts             owner passphrase, sessions, CSRF check
   settings.ts         defaults, providers, encrypted secrets
   memory.ts           memory CRUD + hybrid FTS5 retrieval
   approvals.ts        approval records (kept for old data; the agent never gates)
   llm/                provider adapters (OpenAI-compatible, Gemini) + retries
+supabase/migrations/  Postgres schema, applied on boot (paste into Supabase SQL editor if you prefer)
   agent/              prompt, tool registry, agent loop, chat, tasks, scheduler
   comms/              email (SMTP/IMAP) and phone (Twilio)
   computer/           E2B sandbox manager (shell, code, files, servers, desktop)
@@ -332,6 +371,6 @@ web/src/
 scripts/              smoke + tools verification, Daytona host deploy
 ```
 
-The database lives wherever `DB_URL` points (`.data/blobs.db` by default, or Turso). Everything else — the file
-workspace, the E2B screenshot cache and `secret.key` — stays in `.data/`, so copy that directory (plus your Turso
-database, if you use one) and you have backed up BLOBS.
+The database lives in `DATABASE_URL` (Supabase), workspace files in Supabase Storage when it is configured (and in
+`.data/workspace` otherwise), and the E2B screenshot cache is transient. `secret.key` is replaced entirely by
+`BLOBS_SECRET`, so a Supabase backup plus that one variable is a complete backup of BLOBS.

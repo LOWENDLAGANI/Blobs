@@ -3,6 +3,7 @@ import type { FastifyReply, FastifyRequest } from 'fastify';
 import { get, run } from './db.ts';
 import { now, sha256 } from './util.ts';
 import { SESSION_DAYS } from './env.ts';
+import { createUser, findUserByEmail, supabaseAuthReady, updatePassword, verifyPassword } from './supabase-auth.ts';
 
 const COOKIE = 'blobs_session';
 const SCRYPT_KEYLEN = 64;
@@ -19,8 +20,73 @@ function hashPassphrase(passphrase: string, salt: string): string {
   return crypto.scryptSync(passphrase, salt, SCRYPT_KEYLEN).toString('hex');
 }
 
+export type AuthMode = 'supabase' | 'passphrase';
+
+/**
+ * Email sign-in through Supabase Auth is used whenever it is configured;
+ * otherwise BLOBS keeps its original single owner passphrase. Both paths end
+ * in the same http-only session cookie, so nothing downstream changes.
+ */
+export function authMode(): AuthMode {
+  return supabaseAuthReady() ? 'supabase' : 'passphrase';
+}
+
+export interface OwnerIdentity {
+  email: string;
+  userId: string | null;
+  createdAt: number;
+}
+
+export async function getOwnerIdentity(): Promise<OwnerIdentity | null> {
+  const row = await get<{ email: string; supabase_user_id: string | null; created_at: number }>(
+    'SELECT email, supabase_user_id, created_at FROM owner_identity WHERE id = 1',
+  );
+  if (!row) return null;
+  return { email: row.email, userId: row.supabase_user_id, createdAt: Number(row.created_at) };
+}
+
 export async function ownerExists(): Promise<boolean> {
+  if (authMode() === 'supabase') return (await getOwnerIdentity()) !== null;
   return (await get<{ id: number }>('SELECT id FROM owner WHERE id = 1')) !== null;
+}
+
+const EMAIL_PATTERN = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
+
+/**
+ * First-run enrolment: create the Supabase Auth user, then record which
+ * address owns this instance. The password itself is never stored here.
+ */
+export async function registerOwnerWithEmail(email: string, password: string): Promise<void> {
+  if (await ownerExists()) throw new Error('An owner is already configured.');
+  const address = email.trim().toLowerCase();
+  if (!EMAIL_PATTERN.test(address)) throw new Error('Enter a valid email address.');
+  if (password.trim().length < 8) throw new Error('Choose a password of at least 8 characters.');
+  const user = await createUser(address, password);
+  await run(
+    `INSERT INTO owner_identity(id, email, supabase_user_id, created_at) VALUES (1, ?, ?, ?)
+     ON CONFLICT(id) DO UPDATE SET email = excluded.email, supabase_user_id = excluded.supabase_user_id`,
+    user.email.toLowerCase(),
+    user.id || null,
+    now(),
+  );
+}
+
+export async function verifyOwnerPassword(email: string, password: string): Promise<boolean> {
+  const identity = await getOwnerIdentity();
+  if (!identity) return false;
+  if (identity.email.toLowerCase() !== email.trim().toLowerCase()) return false;
+  return (await verifyPassword(identity.email, password)) !== null;
+}
+
+export async function changeOwnerPassword(current: string, next: string): Promise<void> {
+  const identity = await getOwnerIdentity();
+  if (!identity) throw new Error('No owner account is configured.');
+  if (!(await verifyPassword(identity.email, current))) throw new Error('The current password is incorrect.');
+  if (next.trim().length < 8) throw new Error('Choose a password of at least 8 characters.');
+  const userId = identity.userId ?? (await findUserByEmail(identity.email));
+  if (!userId) throw new Error('The Supabase Auth user for this owner could not be found.');
+  await updatePassword(userId, next);
+  await run('DELETE FROM sessions');
 }
 
 export async function getOwner(): Promise<OwnerRow | null> {
