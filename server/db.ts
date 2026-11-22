@@ -44,6 +44,9 @@ export const pool = new Pool({
   max: Math.max(1, PG_POOL_MAX),
   idleTimeoutMillis: 30_000,
   connectionTimeoutMillis: 15_000,
+  // Never let a single statement hang the boot path (or a request) forever;
+  // a stuck query surfaces as an error instead of an infinite "Waking up…".
+  options: '-c statement_timeout=15000',
   application_name: 'blobs',
   ssl: sslConfig(),
 });
@@ -89,6 +92,74 @@ function toPostgres(sql: string): string {
 }
 
 /* ------------------------------------------------------------------ */
+/* SQL statement splitter (for the schema bootstrap)                    */
+/* ------------------------------------------------------------------ */
+
+/** Splits a SQL file into individual statements, honouring quotes/comments. */
+function splitSql(input: string): string[] {
+  const statements: string[] = [];
+  let current = '';
+  let inSingle = false;
+  let inLineComment = false;
+  let inBlockComment = false;
+  for (let i = 0; i < input.length; i += 1) {
+    const char = input[i] as string;
+    const next = (input[i + 1] ?? '') as string;
+    if (inLineComment) {
+      current += char;
+      if (char === '\n') inLineComment = false;
+      continue;
+    }
+    if (inBlockComment) {
+      current += char;
+      if (char === '*' && next === '/') {
+        current += next;
+        i += 1;
+        inBlockComment = false;
+      }
+      continue;
+    }
+    if (inSingle) {
+      current += char;
+      if (char === "'") {
+        if (next === "'") {
+          current += next;
+          i += 1;
+        } else {
+          inSingle = false;
+        }
+      }
+      continue;
+    }
+    if (char === "'") {
+      inSingle = true;
+      current += char;
+      continue;
+    }
+    if (char === '-' && next === '-') {
+      inLineComment = true;
+      current += char;
+      continue;
+    }
+    if (char === '/' && next === '*') {
+      inBlockComment = true;
+      current += char;
+      continue;
+    }
+    if (char === ';') {
+      const trimmed = current.trim();
+      if (trimmed) statements.push(trimmed);
+      current = '';
+      continue;
+    }
+    current += char;
+  }
+  const tail = current.trim();
+  if (tail) statements.push(tail);
+  return statements;
+}
+
+/* ------------------------------------------------------------------ */
 /* Schema bootstrap                                                    */
 /* ------------------------------------------------------------------ */
 
@@ -102,7 +173,13 @@ export const ready: Promise<void> = (async () => {
     throw new Error(`Schema file is missing at ${SCHEMA_FILE}.`);
   }
   const schema = fs.readFileSync(SCHEMA_FILE, 'utf8');
-  await pool.query(schema);
+  // Run the migration one statement at a time. Sending the whole file as a
+  // single multi-statement query can hang or be mishandled by a pooled
+  // connection (e.g. Supabase's pgbouncer), which left the boot screen stuck
+  // on "Waking up…" forever.
+  for (const statement of splitSql(schema)) {
+    await pool.query(statement);
+  }
 })().catch((error: Error) => {
   const hint = LOCAL_HOSTS.test(DATABASE_URL)
     ? ' Is a local Postgres running on 127.0.0.1:5432 (docker compose up -d db)?'

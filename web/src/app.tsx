@@ -74,11 +74,16 @@ export function App() {
   const [route, setRoute] = useState<Route>(routeFromHash());
 
   const reloadAuth = useCallback(async () => {
+    const controller = new AbortController();
+    const timer = window.setTimeout(() => controller.abort(), 8000);
     try {
-      const state = await api<AuthState>('/api/auth/state');
+      const state = await api<AuthState>('/api/auth/state', { signal: controller.signal });
       setAuth(state);
     } catch {
+      // Degrade instead of hanging forever on "Waking up…".
       setAuth({ setupRequired: false, authed: false, mode: 'passphrase', ownerName: null, ownerEmail: null, companionName: 'BLOBS', tagline: 'Your personal agent' });
+    } finally {
+      window.clearTimeout(timer);
     }
   }, []);
 

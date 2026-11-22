@@ -53,46 +53,51 @@ if (hasDist) {
 }
 
 async function boot(): Promise<void> {
-  // Schema creation and the settings snapshot must exist before the first request.
-  // If they fail (missing DATABASE_URL, unreachable Postgres, …) we still bind
-  // the port so the container stays alive and /api/health can report the real
-  // cause instead of crashing the process and surfacing as a generic 500.
-  let bootError: Error | null = null;
-  try {
-    await ready;
-    await hydrateSettings();
-  } catch (error) {
-    bootError = error as Error;
-    console.error('BLOBS boot dependency failed:', error);
-  }
+  // Bind the port FIRST. The control centre's first request is /api/auth/state,
+  // which degrades gracefully when the database is unavailable; if we instead
+  // await the schema bootstrap before listening, a slow or stuck Postgres query
+  // leaves the browser on "Waking up…" forever.
   try {
     await app.listen({ host: HOST, port: PORT });
-    if (bootError) {
-      console.error('BLOBS is running without a working database:', bootError.message);
-    } else {
-      const settings = getSettings();
-      logActivity({
-        level: 'info',
-        category: 'system',
-        message: `BLOBS ${APP_VERSION} online on port ${PORT} (model: ${settings.model.provider}/${settings.model.model}).`,
-      });
-      if (ROLE === 'server') {
-        logActivity({
-          level: 'info',
-          category: 'system',
-          message: 'Scheduler disabled on this process (BLOBS_ROLE=server); the worker process runs it.',
-        });
-      } else {
-        await startScheduler().catch((error: Error) => {
-          console.error('Scheduler failed to start:', error);
-        });
-      }
-      console.log(`BLOBS listening on http://${HOST}:${PORT} — model ${getSettings().model.provider}/${getSettings().model.model}`);
-    }
   } catch (error) {
     console.error('Failed to start BLOBS:', error);
     process.exit(1);
   }
+
+  // Initialise the database, settings and scheduler in the background. Failures
+  // are reported via /api/health and the console instead of killing the process.
+  void (async () => {
+    let bootError: Error | null = null;
+    try {
+      await ready;
+      await hydrateSettings();
+    } catch (error) {
+      bootError = error as Error;
+      console.error('BLOBS boot dependency failed:', error);
+    }
+    if (bootError) {
+      console.error('BLOBS is running without a working database:', bootError.message);
+      return;
+    }
+    const settings = getSettings();
+    logActivity({
+      level: 'info',
+      category: 'system',
+      message: `BLOBS ${APP_VERSION} online on port ${PORT} (model: ${settings.model.provider}/${settings.model.model}).`,
+    });
+    if (ROLE === 'server') {
+      logActivity({
+        level: 'info',
+        category: 'system',
+        message: 'Scheduler disabled on this process (BLOBS_ROLE=server); the worker process runs it.',
+      });
+    } else {
+      await startScheduler().catch((error: Error) => {
+        console.error('Scheduler failed to start:', error);
+      });
+    }
+    console.log(`BLOBS listening on http://${HOST}:${PORT} — model ${getSettings().model.provider}/${getSettings().model.model}`);
+  })();
 }
 
 void boot();
