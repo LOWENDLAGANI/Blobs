@@ -21,8 +21,13 @@ const PROBE_PORT = Number(process.env.WORKER_PROBE_PORT ?? 8081);
 const STALE_MS = 5 * 60_000;
 
 async function main(): Promise<void> {
-  await ready;
-  await hydrateSettings();
+  try {
+    await ready;
+    await hydrateSettings();
+  } catch (error) {
+    console.error('Scheduler worker boot dependency failed:', error);
+    process.exit(1);
+  }
   await startScheduler();
   logActivity({
     level: 'info',

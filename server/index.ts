@@ -53,28 +53,42 @@ if (hasDist) {
 }
 
 async function boot(): Promise<void> {
+  // Schema creation and the settings snapshot must exist before the first request.
+  // If they fail (missing DATABASE_URL, unreachable Postgres, …) we still bind
+  // the port so the container stays alive and /api/health can report the real
+  // cause instead of crashing the process and surfacing as a generic 500.
+  let bootError: Error | null = null;
   try {
-    // Schema creation and the settings snapshot must exist before the first request.
     await ready;
     await hydrateSettings();
+  } catch (error) {
+    bootError = error as Error;
+    console.error('BLOBS boot dependency failed:', error);
+  }
+  try {
     await app.listen({ host: HOST, port: PORT });
-    const settings = getSettings();
-    logActivity({
-      level: 'info',
-      category: 'system',
-      message: `BLOBS ${APP_VERSION} online on port ${PORT} (model: ${settings.model.provider}/${settings.model.model}).`,
-    });
-    if (ROLE === 'server') {
-      // Split deployment: the scheduler runs in its own process (server/worker.ts).
+    if (bootError) {
+      console.error('BLOBS is running without a working database:', bootError.message);
+    } else {
+      const settings = getSettings();
       logActivity({
         level: 'info',
         category: 'system',
-        message: 'Scheduler disabled on this process (BLOBS_ROLE=server); the worker process runs it.',
+        message: `BLOBS ${APP_VERSION} online on port ${PORT} (model: ${settings.model.provider}/${settings.model.model}).`,
       });
-    } else {
-      await startScheduler();
+      if (ROLE === 'server') {
+        logActivity({
+          level: 'info',
+          category: 'system',
+          message: 'Scheduler disabled on this process (BLOBS_ROLE=server); the worker process runs it.',
+        });
+      } else {
+        await startScheduler().catch((error: Error) => {
+          console.error('Scheduler failed to start:', error);
+        });
+      }
+      console.log(`BLOBS listening on http://${HOST}:${PORT} — model ${getSettings().model.provider}/${getSettings().model.model}`);
     }
-    console.log(`BLOBS listening on http://${HOST}:${PORT} — model ${settings.model.provider}/${settings.model.model}`);
   } catch (error) {
     console.error('Failed to start BLOBS:', error);
     process.exit(1);

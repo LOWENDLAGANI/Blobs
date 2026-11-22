@@ -110,6 +110,12 @@ export const ready: Promise<void> = (async () => {
   throw new Error(`Could not prepare the Postgres schema: ${error.message}.${hint}`);
 });
 
+// `ready` is created at module load and may reject before anyone awaits it.
+// Attaching a handler here marks the rejection as handled so Node does not
+// terminate the process on an unhandled promise rejection; awaiting `ready`
+// still re-throws the underlying error.
+ready.catch(() => undefined);
+
 /* ------------------------------------------------------------------ */
 /* Query helpers                                                       */
 /* ------------------------------------------------------------------ */

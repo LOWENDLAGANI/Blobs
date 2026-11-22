@@ -38,16 +38,24 @@ export interface OwnerIdentity {
 }
 
 export async function getOwnerIdentity(): Promise<OwnerIdentity | null> {
-  const row = await get<{ email: string; supabase_user_id: string | null; created_at: number }>(
-    'SELECT email, supabase_user_id, created_at FROM owner_identity WHERE id = 1',
-  );
-  if (!row) return null;
-  return { email: row.email, userId: row.supabase_user_id, createdAt: Number(row.created_at) };
+  try {
+    const row = await get<{ email: string; supabase_user_id: string | null; created_at: number }>(
+      'SELECT email, supabase_user_id, created_at FROM owner_identity WHERE id = 1',
+    );
+    if (!row) return null;
+    return { email: row.email, userId: row.supabase_user_id, createdAt: Number(row.created_at) };
+  } catch {
+    return null;
+  }
 }
 
 export async function ownerExists(): Promise<boolean> {
-  if (authMode() === 'supabase') return (await getOwnerIdentity()) !== null;
-  return (await get<{ id: number }>('SELECT id FROM owner WHERE id = 1')) !== null;
+  try {
+    if (authMode() === 'supabase') return (await getOwnerIdentity()) !== null;
+    return (await get<{ id: number }>('SELECT id FROM owner WHERE id = 1')) !== null;
+  } catch {
+    return false;
+  }
 }
 
 const EMAIL_PATTERN = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
