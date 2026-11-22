@@ -48,6 +48,26 @@ async function main(): Promise<void> {
   }
   check('fetch_page refuses private addresses (SSRF guard)', blocked);
 
+  let blockedIpv6 = false;
+  try {
+    const local = await fetchPage.run({ url: 'http://[::1]:3000/' }, context);
+    blockedIpv6 = !local.ok;
+  } catch {
+    blockedIpv6 = true;
+  }
+  check('fetch_page refuses bracketed IPv6 loopback (SSRF guard)', blockedIpv6);
+
+  let blockedRebinding = false;
+  try {
+    // A public-looking name that resolves to 127.0.0.1; it is refused whether or
+    // not the lookup succeeds, because an unresolvable host is blocked too.
+    const local = await fetchPage.run({ url: 'http://localtest.me:3000/' }, context);
+    blockedRebinding = !local.ok;
+  } catch {
+    blockedRebinding = true;
+  }
+  check('fetch_page refuses a name that resolves to loopback (SSRF guard)', blockedRebinding);
+
   console.log('\nWorkspace files');
   const note = await writeNote.run(
     { path: 'notes/smoke.md', content: '# Smoke note\n\nWritten by the tools check.' },

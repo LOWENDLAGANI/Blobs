@@ -2,15 +2,7 @@ import { all, get, run } from './db.ts';
 import { broadcast, logActivity, notify } from './activity.ts';
 import { getSettings } from './settings.ts';
 import { webSearch } from './search.ts';
-import {
-  assertPublicUrl,
-  fetchWithTimeout,
-  htmlToText,
-  id,
-  now,
-  sha256,
-  truncate,
-} from './util.ts';
+import { fetchPublicUrl, htmlToText, id, now, sha256, truncate } from './util.ts';
 
 /**
  * Watches: the proactive half of the agent.
@@ -97,15 +89,13 @@ async function snapshot(kind: WatchKind, target: string): Promise<Snapshot> {
     return { fingerprint, summary };
   }
 
-  const url = assertPublicUrl(target);
-  const response = await fetchWithTimeout(
-    url.toString(),
+  const response = await fetchPublicUrl(
+    target,
     {
       headers: {
         'user-agent': USER_AGENT,
         accept: 'text/html,application/rss+xml,application/atom+xml,application/xml,text/xml,application/json;q=0.9,*/*;q=0.8',
       },
-      redirect: 'follow',
     },
     20_000,
   );

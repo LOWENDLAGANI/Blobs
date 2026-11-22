@@ -2,7 +2,7 @@ import { all, get, run } from './db.ts';
 import { complete } from './llm/index.ts';
 import { createDeliverable } from './deliverables.ts';
 import { webSearch, hasExaKey, type SearchHit } from './search.ts';
-import { assertPublicUrl, extractTitle, fetchWithTimeout, htmlToText, id, now, truncate } from './util.ts';
+import { extractTitle, fetchPublicUrl, htmlToText, id, now, truncate } from './util.ts';
 
 /**
  * Deep research.
@@ -170,16 +170,14 @@ async function readSource(hit: SearchHit, index: number): Promise<ReadSource | n
   let text = hit.snippet ?? '';
   let title = hit.title;
   try {
-    const target = assertPublicUrl(hit.url);
-    const response = await fetchWithTimeout(
-      target.toString(),
+    const response = await fetchPublicUrl(
+      hit.url,
       {
         headers: {
           'user-agent':
             'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0 Safari/537.36',
           accept: 'text/html,application/xhtml+xml,application/json;q=0.9,*/*;q=0.8',
         },
-        redirect: 'follow',
       },
       15_000,
     );

@@ -12,7 +12,7 @@ import {
   mergeMemories,
   type MemoryKind,
 } from '../memory.ts';
-import { assertPublicUrl, extractTitle, fetchWithTimeout, htmlToText, truncate } from '../util.ts';
+import { assertPublicUrl, extractTitle, fetchPublicUrl, htmlToText, truncate } from '../util.ts';
 import type { ToolSchema } from '../llm/types.ts';
 import { createTask, executeTask, getTask, listTaskRows, normalizeSchedule } from './tasks.ts';
 import { webSearch, type SearchHit } from '../search.ts';
@@ -232,9 +232,9 @@ export const TOOLS: ToolDef[] = [
     async run(args) {
       const raw = str(args, 'url').trim();
       const target = assertPublicUrl(raw);
-      const response = await fetchWithTimeout(
+      const response = await fetchPublicUrl(
         target.toString(),
-        { headers: { 'user-agent': USER_AGENT, accept: 'text/html,application/xhtml+xml,application/json;q=0.9,*/*;q=0.8' }, redirect: 'follow' },
+        { headers: { 'user-agent': USER_AGENT, accept: 'text/html,application/xhtml+xml,application/json;q=0.9,*/*;q=0.8' } },
         20_000,
       );
       if (!response.ok) {
@@ -1040,7 +1040,7 @@ export const TOOLS: ToolDef[] = [
   {
     name: 'send_email',
     description:
-      'Send an email as BLOBS from its own configured address. Requires the owner to connect email in Integrations and to approve this action.',
+      'Send an email as BLOBS from its own configured address. Requires the owner to connect email in Integrations. It sends immediately: BLOBS is autonomous and there is no approval step, so say what you sent afterwards.',
     parameters: {
       type: 'object',
       properties: {
@@ -1078,7 +1078,7 @@ export const TOOLS: ToolDef[] = [
   {
     name: 'make_phone_call',
     description:
-      'Call the owner (or an approved number) and speak a short message. Requires a Twilio connection and owner approval.',
+      'Call the owner (or another number) and speak a short message. Requires a Twilio connection. It dials immediately: BLOBS is autonomous and there is no approval step, so report the call afterwards.',
     parameters: {
       type: 'object',
       properties: {

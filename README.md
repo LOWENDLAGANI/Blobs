@@ -24,7 +24,7 @@ a model layer you can point at Gemini's free tier, a small DeepSeek top-up, or a
 
 ## Quick start
 
-Requires **Node 22.6+** and Postgres — a Supabase project is the intended backend, and its pooled connection string is
+Requires **Node 22.18+** (the server runs its TypeScript sources directly, which is on by default from 22.18) and Postgres — a Supabase project is the intended backend, and its pooled connection string is
 the only database setting there is.
 
 ```bash
@@ -293,7 +293,9 @@ Tool output is always treated as **untrusted data** and fenced as such in the pr
 instructions found in webpages, files or messages must never override the owner's rules, and the execution limits and
 emergency stop are enforced in server code — not by asking the model nicely.
 
-`fetch_page` blocks loopback, private, link-local and metadata-style addresses, and refuses non-http(s) schemes.
+`fetch_page` blocks loopback, private, link-local and metadata-style addresses, and refuses non-http(s) schemes. It also
+resolves the hostname and checks every address that comes back, so a public name pointing at `127.0.0.1` is refused, and
+it follows redirects by hand with the same check on each hop.
 
 ## The cloud computer (E2B)
 
@@ -378,7 +380,7 @@ BLOBS is **autonomous-first**. Voice and chat are the front door, and no screen 
 ## Verification
 
 ```bash
-npm run smoke        # 27 end-to-end checks against a throwaway local database (blobs_smoke)
+npm run smoke        # 41 end-to-end checks against a throwaway local database (blobs_smoke)
 node scripts/tools-check.ts   # live web research, files, sandbox, SSRF guard
 npx tsc --noEmit
 npm run build

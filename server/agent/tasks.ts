@@ -697,8 +697,11 @@ export async function executeTask(taskId: string): Promise<void> {
     const next = schedule.type === 'once' ? null : nextRunAt(schedule);
     if (next !== null) {
       await run('DELETE FROM task_steps WHERE task_id = ?', taskId);
+      // attempts counts consecutive tries of the current run, so it resets here.
+      // Otherwise a long-lived recurring task would hit max_attempts and be
+      // declared "interrupted too many times" after its third successful round.
       await run(
-        `UPDATE tasks SET status = 'queued', checkpoint = NULL, plan = NULL, next_run_at = ?, completed_at = ?,
+        `UPDATE tasks SET status = 'queued', checkpoint = NULL, plan = NULL, attempts = 0, next_run_at = ?, completed_at = ?,
           heartbeat = NULL, updated_at = ? WHERE id = ?`,
         next,
         now(),

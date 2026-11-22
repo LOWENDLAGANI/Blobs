@@ -1,4 +1,5 @@
 import crypto from 'node:crypto';
+import dns from 'node:dns/promises';
 import net from 'node:net';
 import { SECRET_KEY } from './env.ts';
 
@@ -82,9 +83,21 @@ export function extractTitle(html: string): string {
   return match ? htmlToText(match[1]).slice(0, 200) : '';
 }
 
+/** Dotted quad for an IPv4-mapped/compatible IPv6 literal, else null. */
+function mappedIpv4(host: string): string | null {
+  const match = /^::(?:ffff:)?([0-9a-f]{1,4}):([0-9a-f]{1,4})$/.exec(host);
+  if (!match) return null;
+  const high = parseInt(match[1] as string, 16);
+  const low = parseInt(match[2] as string, 16);
+  return `${(high >> 8) & 0xff}.${high & 0xff}.${(low >> 8) & 0xff}.${low & 0xff}`;
+}
+
 /** Reject loopback / private / link-local targets so tools cannot probe the host. */
 export function isPrivateAddress(hostname: string): boolean {
-  const host = hostname.toLowerCase();
+  // URL.hostname keeps the brackets around an IPv6 literal and the trailing dot
+  // of an absolute name ("localhost."), so normalise before classifying.
+  const host = hostname.toLowerCase().replace(/^\[|\]$/g, '').replace(/\.+$/, '');
+  if (!host) return true;
   if (host === 'localhost' || host.endsWith('.localhost') || host.endsWith('.local') || host.endsWith('.internal')) {
     return true;
   }
@@ -99,7 +112,16 @@ export function isPrivateAddress(hostname: string): boolean {
     return false;
   }
   if (net.isIPv6(host)) {
-    return host === '::1' || host === '::' || host.startsWith('fc') || host.startsWith('fd') || host.startsWith('fe80');
+    const mapped = mappedIpv4(host);
+    if (mapped) return isPrivateAddress(mapped);
+    return (
+      host === '::1' ||
+      host === '::' ||
+      host.startsWith('fc') || // unique-local fc00::/7
+      host.startsWith('fd') ||
+      /^fe[89ab]/.test(host) || // link-local fe80::/10
+      host.startsWith('ff') // multicast ff00::/8
+    );
   }
   return false;
 }
@@ -132,6 +154,71 @@ export async function fetchWithTimeout(
   } finally {
     clearTimeout(timer);
   }
+}
+
+/**
+ * Resolve a hostname the way the request will and refuse it if ANY address is
+ * private. Checking the literal is not enough: names such as `localtest.me`,
+ * `127.0.0.1.nip.io` or a rebinding domain look public but resolve to loopback
+ * or a private range.
+ */
+export async function assertPublicHost(hostname: string): Promise<void> {
+  if (isPrivateAddress(hostname)) {
+    throw new Error('Refusing to fetch a private or local address.');
+  }
+  const host = hostname.replace(/^\[|\]$/g, '');
+  if (net.isIP(host)) return; // a public literal, already classified above
+  let addresses: { address: string }[];
+  try {
+    addresses = await dns.lookup(host, { all: true, verbatim: true });
+  } catch {
+    throw new Error(`Could not resolve ${host}.`);
+  }
+  if (!addresses.length) throw new Error(`Could not resolve ${host}.`);
+  if (addresses.some((entry) => isPrivateAddress(entry.address))) {
+    throw new Error('Refusing to fetch a hostname that resolves to a private or local address.');
+  }
+}
+
+const REDIRECT_STATUS = new Set([301, 302, 303, 307, 308]);
+const MAX_REDIRECTS = 5;
+
+/**
+ * Fetch a URL that came from the model, a search result or a page with the SSRF
+ * guard applied to the original host, to its resolved addresses and to every
+ * redirect hop. Redirects are followed by hand so `redirect: 'follow'` cannot
+ * walk from a public page into the host's own network after the first check.
+ */
+export async function fetchPublicUrl(
+  raw: string,
+  init: RequestInit = {},
+  timeoutMs = 20_000,
+): Promise<Response> {
+  let target = assertPublicUrl(raw);
+  for (let hop = 0; hop <= MAX_REDIRECTS; hop += 1) {
+    await assertPublicHost(target.hostname);
+    const response = await fetchWithTimeout(
+      target.toString(),
+      { ...init, redirect: 'manual' },
+      timeoutMs,
+    );
+    if (!REDIRECT_STATUS.has(response.status)) return response;
+    const location = response.headers.get('location');
+    if (!location) return response;
+    try {
+      await response.body?.cancel();
+    } catch {
+      /* the redirect body is not needed; a failed cancel must not mask the hop */
+    }
+    let next: URL;
+    try {
+      next = new URL(location, target);
+    } catch {
+      throw new Error('The page redirected to an invalid URL.');
+    }
+    target = assertPublicUrl(next.toString());
+  }
+  throw new Error('Too many redirects.');
 }
 
 export async function sleep(ms: number): Promise<void> {
