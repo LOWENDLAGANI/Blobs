@@ -3,7 +3,6 @@ import { APP_VERSION } from './env.ts';
 import { all, get, run } from './db.ts';
 import {
   authMode,
-  changeOwnerPassword,
   changePassphrase,
   clearSessionCookie,
   createOwner,
@@ -15,10 +14,8 @@ import {
   loginAllowed,
   ownerExists,
   recordFailedLogin,
-  registerOwnerWithEmail,
   sessionToken,
   setSessionCookie,
-  verifyOwnerPassword,
   verifyPassphrase,
 } from './auth.ts';
 import {
@@ -224,22 +221,12 @@ export async function registerRoutes(app: FastifyInstance): Promise<void> {
 
   app.post('/api/auth/setup', async (request, reply) => {
     if (await ownerExists()) return bad(reply, 'An owner is already configured.', 409);
-    const body = (request.body ?? {}) as { name?: string; email?: string; password?: string; passphrase?: string };
+    const body = (request.body ?? {}) as { name?: string; passphrase?: string };
     const name = (body.name ?? '').trim() || 'Owner';
-    if (authMode() === 'supabase') {
-      if (!body.email || !body.password) return bad(reply, 'Enter an email address and a password.');
-      if (body.password.length < 8) return bad(reply, 'Choose a password with at least 8 characters.');
-      try {
-        await registerOwnerWithEmail(body.email, body.password);
-      } catch (error) {
-        return bad(reply, (error as Error).message);
-      }
-    } else {
-      if (!body.passphrase || body.passphrase.length < 8) {
-        return bad(reply, 'Choose a passphrase with at least 8 characters.');
-      }
-      await createOwner(name, body.passphrase);
+    if (!body.passphrase || body.passphrase.length < 8) {
+      return bad(reply, 'Choose a passphrase with at least 8 characters.');
     }
+    await createOwner(name, body.passphrase);
     await saveSettings({ owner: { name } });
     const token = await createSession();
     setSessionCookie(reply, token);
@@ -255,18 +242,19 @@ export async function registerRoutes(app: FastifyInstance): Promise<void> {
 
     let ok = false;
     try {
-      ok =
-        authMode() === 'supabase'
-          ? Boolean(body.email && body.password) && (await verifyOwnerPassword(body.email ?? '', body.password ?? ''))
-          : Boolean(body.passphrase) && (await verifyPassphrase(body.passphrase ?? ''));
+      ok = Boolean(body.passphrase) && (await verifyPassphrase(body.passphrase ?? ''));
     } catch (error) {
-      return bad(reply, `Sign-in is unavailable right now: ${(error as Error).message}`, 502);
+      const detail = (error as Error).message;
+      const hint = /connection|timeout|econn|enotfound/i.test(detail)
+        ? ' The server could not reach Postgres. Check DATABASE_URL and that the database (or Supabase project) is awake, then try again.'
+        : '';
+      return bad(reply, `Sign-in is unavailable right now: ${detail}${hint}`, 502);
     }
     if (!ok) {
       recordFailedLogin(ip);
       return bad(
         reply,
-        authMode() === 'supabase' ? 'That email and password do not match.' : 'That passphrase is not correct.',
+        'That passphrase is not correct.',
         401,
       );
     }
@@ -284,12 +272,11 @@ export async function registerRoutes(app: FastifyInstance): Promise<void> {
   app.post('/api/auth/password', async (request, reply) => {
     const body = (request.body ?? {}) as { current?: string; next?: string };
     try {
-      if (authMode() === 'supabase') await changeOwnerPassword(body.current ?? '', body.next ?? '');
-      else await changePassphrase(body.current ?? '', body.next ?? '');
+      await changePassphrase(body.current ?? '', body.next ?? '');
       logActivity({
         level: 'warn',
         category: 'security',
-        message: authMode() === 'supabase' ? 'Owner password changed; all sessions signed out.' : 'Owner passphrase changed; all sessions signed out.',
+        message: 'Owner passphrase changed; all sessions signed out.',
       });
       return { ok: true };
     } catch (error) {

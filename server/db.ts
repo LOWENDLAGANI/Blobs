@@ -42,11 +42,16 @@ function sslConfig(): { rejectUnauthorized: boolean } | undefined {
 export const pool = new Pool({
   connectionString: DATABASE_URL,
   max: Math.max(1, PG_POOL_MAX),
-  idleTimeoutMillis: 30_000,
-  connectionTimeoutMillis: 15_000,
-  // Never let a single statement hang the boot path (or a request) forever;
-  // a stuck query surfaces as an error instead of an infinite "Waking up…".
-  options: '-c statement_timeout=15000',
+  // Keep idle clients around longer so a quiet instance does not pay a fresh
+  // TCP/TLS handshake (and Supabase pooler wake-up) on every request.
+  idleTimeoutMillis: 60_000,
+  // Supabase free-tier databases and paused projects can take well over 15s
+  // to accept the first connection; give them room to wake before declaring a
+  // timeout. A genuine network failure still surfaces, just later.
+  connectionTimeoutMillis: 60_000,
+  // Match the connection budget so a single slow statement cannot outlive it,
+  // while still allowing the schema bootstrap and FTS queries to finish.
+  options: '-c statement_timeout=60000',
   application_name: 'blobs',
   ssl: sslConfig(),
 });
@@ -220,18 +225,50 @@ function normalize(params: unknown[]): Param[] {
   });
 }
 
+function isConnectionError(error: unknown): boolean {
+  const message = String((error as Error)?.message ?? error ?? '').toLowerCase();
+  const code = String((error as { code?: string })?.code ?? '').toLowerCase();
+  return (
+    message.includes('connection terminated') ||
+    message.includes('connection timeout') ||
+    message.includes('connect timeout') ||
+    message.includes('econnrefused') ||
+    message.includes('econnreset') ||
+    message.includes('etimedout') ||
+    message.includes('enotfound') ||
+    code === 'etimedout' ||
+    code === 'econnrefused' ||
+    code === 'econnreset' ||
+    code === 'enotfound'
+  );
+}
+
+/** Retry a single query once when the failure looks like a transient connection problem. */
+async function queryWithRetry<T>(execute: () => Promise<T>): Promise<T> {
+  // Never retry inside an explicit transaction: the client is already bound and
+  // a retry would run on a different (or dead) connection.
+  if (scoped.getStore()) return execute();
+  try {
+    return await execute();
+  } catch (error) {
+    if (!isConnectionError(error)) throw error;
+    await new Promise((resolve) => setTimeout(resolve, 1_500));
+    return execute();
+  }
+}
+
 export async function all<T = Row>(sql: string, ...params: unknown[]): Promise<T[]> {
-  const result = await runner().query<QueryResultRow>(toPostgres(sql), normalize(params));
+  const result = await queryWithRetry(() => runner().query<QueryResultRow>(toPostgres(sql), normalize(params)));
   return result.rows as unknown as T[];
 }
 
 export async function get<T = Row>(sql: string, ...params: unknown[]): Promise<T | null> {
-  const result = await runner().query<QueryResultRow>(toPostgres(sql), normalize(params));
+  const result = await queryWithRetry(() => runner().query<QueryResultRow>(toPostgres(sql), normalize(params)));
   return (result.rows[0] as unknown as T) ?? null;
 }
 
 export async function run(sql: string, ...params: unknown[]): Promise<void> {
-  await runner().query(toPostgres(sql), normalize(params));
+  await queryWithRetry(() => runner().query(toPostgres(sql), normalize(params)));
 }
 
 export async function count(sql: string, ...params: unknown[]): Promise<number> {
