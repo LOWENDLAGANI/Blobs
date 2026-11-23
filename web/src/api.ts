@@ -6,6 +6,23 @@ export class ApiError extends Error {
   }
 }
 
+/**
+ * Fastify answers an unhandled error with `error: "Internal Server Error"` and
+ * the real reason in `message`. Showing only `error` turned every failure —
+ * an unreachable database included — into the same four words on screen.
+ */
+function failureMessage(data: unknown, status: number): string {
+  const body = (data ?? {}) as { error?: unknown; message?: unknown; hint?: unknown };
+  const errorText = typeof body.error === 'string' ? body.error : '';
+  const detail = typeof body.message === 'string' ? body.message : '';
+  const hint = typeof body.hint === 'string' ? body.hint : '';
+  const base =
+    errorText && errorText !== 'Internal Server Error'
+      ? errorText
+      : detail || errorText || `Request failed (${status})`;
+  return [base, hint].filter(Boolean).join(' ');
+}
+
 export async function api<T>(path: string, init?: RequestInit): Promise<T> {
   const response = await fetch(path, {
     credentials: 'same-origin',
@@ -25,11 +42,7 @@ export async function api<T>(path: string, init?: RequestInit): Promise<T> {
     }
   }
   if (!response.ok) {
-    const message =
-      data && typeof data === 'object' && 'error' in data
-        ? String((data as { error: string }).error)
-        : `Request failed (${response.status})`;
-    throw new ApiError(message, response.status);
+    throw new ApiError(failureMessage(data, response.status), response.status);
   }
   return (data ?? {}) as T;
 }
@@ -90,8 +103,7 @@ export async function streamChat(
     const text = await response.text().catch(() => '');
     let message = `The agent could not respond (${response.status}).`;
     try {
-      const parsed = JSON.parse(text) as { error?: string };
-      if (parsed.error) message = parsed.error;
+      message = failureMessage(JSON.parse(text), response.status);
     } catch {
       /* keep the generic message */
     }

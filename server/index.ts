@@ -1,6 +1,7 @@
 import path from 'node:path';
 import fs from 'node:fs';
 import Fastify from 'fastify';
+import type { FastifyError } from 'fastify';
 import cookie from '@fastify/cookie';
 import fastifyStatic from '@fastify/static';
 import { HOST, PORT, ROOT, APP_VERSION, ROLE } from './env.ts';
@@ -17,6 +18,63 @@ const app = Fastify({
 });
 
 await app.register(cookie);
+
+const CONNECTION_FAILURE =
+  /econnrefused|econnreset|enotfound|etimedout|connection terminated|connection timeout|timeout expired|terminating connection|server closed the connection/i;
+
+/**
+ * Turns a raw Postgres failure into something the owner can act on. Without
+ * this the browser only ever sees "Internal Server Error", so a host that
+ * cannot reach its database looks like a broken app with no explanation.
+ */
+function databaseFailure(code: string | undefined, detail: string): { message: string; hint: string } | null {
+  if (code === '28P01' || /password authentication failed/i.test(detail)) {
+    return {
+      message: `BLOBS cannot sign in to its database: ${detail}`,
+      hint: 'Check the user and password inside DATABASE_URL.',
+    };
+  }
+  if (code === '42P01' || /relation "[^"]+" does not exist/i.test(detail)) {
+    return {
+      message: `BLOBS reached its database but its tables are missing: ${detail}`,
+      hint: 'The schema is applied on boot; check the server log for the migration error.',
+    };
+  }
+  if (CONNECTION_FAILURE.test(detail)) {
+    return {
+      message: `BLOBS cannot reach its database: ${detail}`,
+      hint: 'Check DATABASE_URL on the host (Supabase → Project Settings → Database → Connection string → Connection pooling) and that the database is awake.',
+    };
+  }
+  return null;
+}
+
+/**
+ * One handler for every unhandled route error. It keeps the real message
+ * instead of Fastify's bare "Internal Server Error" and marks a database it
+ * cannot use as 503 (not ready) rather than 500 (broken code).
+ */
+app.setErrorHandler((error: FastifyError, request, reply) => {
+  // /api/chat and /api/events stream their own frames; once SSE headers are on
+  // the wire there is no HTTP status left to change.
+  if (reply.raw.headersSent) {
+    reply.raw.end();
+    return;
+  }
+  const status = error.statusCode ?? 500;
+  const detail = error.message || 'Unexpected server error.';
+  if (status < 500) {
+    reply.code(status).send({ error: detail });
+    return;
+  }
+  request.log.error({ err: error }, 'Request failed');
+  const database = databaseFailure(error.code, detail);
+  if (database) {
+    reply.code(503).send({ error: database.message, hint: database.hint });
+    return;
+  }
+  reply.code(500).send({ error: detail });
+});
 
 await app.register(registerRoutes);
 
