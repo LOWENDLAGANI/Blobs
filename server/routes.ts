@@ -1,6 +1,6 @@
 import type { FastifyInstance, FastifyReply, FastifyRequest } from 'fastify';
 import { APP_VERSION } from './env.ts';
-import { all, get, run } from './db.ts';
+import { all, get, run, withDeadline } from './db.ts';
 import {
   authMode,
   changePassphrase,
@@ -13,6 +13,7 @@ import {
   isSameOrigin,
   loginAllowed,
   ownerExists,
+  ownerMissing,
   recordFailedLogin,
   sessionToken,
   setSessionCookie,
@@ -126,6 +127,18 @@ import { clamp, now, truncate } from './util.ts';
 import { dbStatus } from './db.ts';
 import { workspaceBackend } from './workspace.ts';
 
+/** Sign-in must answer quickly even while Postgres is unreachable. */
+const AUTH_DB_TIMEOUT_MS = 12_000;
+const AUTH_DB_TIMEOUT_MESSAGE = 'Timed out reaching Postgres.';
+
+function authDbUnavailable(reply: FastifyReply, error: unknown): void {
+  const detail = (error as Error).message;
+  const hint = /connection|timeout|timed out|econn|enotfound/i.test(detail)
+    ? ' The server could not reach Postgres. Check DATABASE_URL and that the database (or Supabase project) is awake, then try again.'
+    : '';
+  bad(reply, `Sign-in is unavailable right now: ${detail}${hint}`, 503);
+}
+
 const PUBLIC_PATHS = new Set([
   '/api/health',
   '/api/auth/state',
@@ -207,28 +220,60 @@ export async function registerRoutes(app: FastifyInstance): Promise<void> {
 
   app.get('/api/auth/state', async (request) => {
     const settings = getSettings();
-    const identity = await getOwnerIdentity();
+    // One budget for the whole handler: the browser gives up on this request
+    // after 8s and falls back to the sign-in screen, so the server should have
+    // answered by then even if every query is stuck on a sleeping database.
+    let setupRequired = false;
+    let authed = false;
+    let ownerEmail: string | null = null;
+    try {
+      const [missing, session, identity] = await withDeadline(
+        Promise.all([ownerMissing(), isAuthed(request), getOwnerIdentity()]),
+        6_000,
+        AUTH_DB_TIMEOUT_MESSAGE,
+      );
+      setupRequired = missing;
+      authed = session;
+      ownerEmail = identity?.email ?? null;
+    } catch {
+      // Database unknown: offer sign-in (which reports the real problem) rather
+      // than claiming this is a first run and inviting a second owner.
+      setupRequired = false;
+      authed = false;
+    }
     return {
-      setupRequired: !await ownerExists(),
-      authed: await isAuthed(request),
+      setupRequired,
+      authed,
       mode: authMode(),
       ownerName: settings.owner.name,
-      ownerEmail: identity?.email ?? null,
+      ownerEmail,
       companionName: settings.companion.name,
       tagline: settings.companion.tagline,
     };
   });
 
   app.post('/api/auth/setup', async (request, reply) => {
-    if (await ownerExists()) return bad(reply, 'An owner is already configured.', 409);
+    try {
+      if (!(await withDeadline(ownerMissing(), AUTH_DB_TIMEOUT_MS, AUTH_DB_TIMEOUT_MESSAGE))) {
+        return bad(reply, 'An owner is already configured.', 409);
+      }
+    } catch (error) {
+      return authDbUnavailable(reply, error);
+    }
     const body = (request.body ?? {}) as { name?: string; passphrase?: string };
     const name = (body.name ?? '').trim() || 'Owner';
     if (!body.passphrase || body.passphrase.length < 8) {
       return bad(reply, 'Choose a passphrase with at least 8 characters.');
     }
-    await createOwner(name, body.passphrase);
-    await saveSettings({ owner: { name } });
-    const token = await createSession();
+    try {
+      await withDeadline(createOwner(name, body.passphrase), AUTH_DB_TIMEOUT_MS, AUTH_DB_TIMEOUT_MESSAGE);
+      await withDeadline(saveSettings({ owner: { name } }), AUTH_DB_TIMEOUT_MS, AUTH_DB_TIMEOUT_MESSAGE);
+    } catch (error) {
+      return authDbUnavailable(reply, error);
+    }
+    const token = await withDeadline(createSession(), AUTH_DB_TIMEOUT_MS, AUTH_DB_TIMEOUT_MESSAGE)
+      .catch(() => null);
+    if (!token) return bad(reply, 'BLOBS was configured, but the session could not be saved. Sign in again.', 503);
     setSessionCookie(reply, token);
     logActivity({ level: 'info', category: 'system', message: 'BLOBS was initialised by its owner.' });
     notify({ title: `Welcome to ${getSettings().companion.name}`, body: 'Start with a voice session, or add a model key in Settings.', level: 'success' });
@@ -242,13 +287,15 @@ export async function registerRoutes(app: FastifyInstance): Promise<void> {
 
     let ok = false;
     try {
-      ok = Boolean(body.passphrase) && (await verifyPassphrase(body.passphrase ?? ''));
+      ok =
+        Boolean(body.passphrase) &&
+        (await withDeadline(
+          verifyPassphrase(body.passphrase ?? ''),
+          AUTH_DB_TIMEOUT_MS,
+          AUTH_DB_TIMEOUT_MESSAGE,
+        ));
     } catch (error) {
-      const detail = (error as Error).message;
-      const hint = /connection|timeout|econn|enotfound/i.test(detail)
-        ? ' The server could not reach Postgres. Check DATABASE_URL and that the database (or Supabase project) is awake, then try again.'
-        : '';
-      return bad(reply, `Sign-in is unavailable right now: ${detail}${hint}`, 502);
+      return authDbUnavailable(reply, error);
     }
     if (!ok) {
       recordFailedLogin(ip);
@@ -258,7 +305,12 @@ export async function registerRoutes(app: FastifyInstance): Promise<void> {
         401,
       );
     }
-    const token = await createSession();
+    let token: string;
+    try {
+      token = await withDeadline(createSession(), AUTH_DB_TIMEOUT_MS, AUTH_DB_TIMEOUT_MESSAGE);
+    } catch (error) {
+      return authDbUnavailable(reply, error);
+    }
     setSessionCookie(reply, token);
     return { ok: true };
   });

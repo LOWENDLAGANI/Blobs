@@ -55,6 +55,15 @@ export async function ownerExists(): Promise<boolean> {
   }
 }
 
+/**
+ * Like `ownerExists`, but lets a database failure surface. A first-run screen is
+ * only correct when the database actually says there is no owner: treating an
+ * outage as "no owner" invites the setup form over an existing install.
+ */
+export async function ownerMissing(): Promise<boolean> {
+  return (await get<{ id: number }>('SELECT id FROM owner WHERE id = 1')) === null;
+}
+
 export async function getOwner(): Promise<OwnerRow | null> {
   return get<OwnerRow>('SELECT * FROM owner WHERE id = 1');
 }

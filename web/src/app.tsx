@@ -138,6 +138,26 @@ export function App() {
 /* Screens                                                             */
 /* ------------------------------------------------------------------ */
 
+/**
+ * Sign-in/setup must never leave the form spinning: if the server does not
+ * answer (usually an unreachable database), abort and say so. The server bounds
+ * the database work itself; this covers a request that hangs before that.
+ */
+async function authPost(path: string, body: unknown): Promise<void> {
+  const controller = new AbortController();
+  const timer = window.setTimeout(() => controller.abort(), 20_000);
+  try {
+    await post(path, body, { signal: controller.signal });
+  } catch (error) {
+    if ((error as Error).name === 'AbortError') {
+      throw new Error('The server did not answer in time. Check that its database is reachable, then try again.');
+    }
+    throw error;
+  } finally {
+    window.clearTimeout(timer);
+  }
+}
+
 function SetupScreen({ mode, onDone }: { mode: AuthMode; onDone: () => Promise<void> }) {
   const toast = useToast();
   const [name, setName] = useState('');
@@ -155,7 +175,7 @@ function SetupScreen({ mode, onDone }: { mode: AuthMode; onDone: () => Promise<v
     setBusy(true);
     setError('');
     try {
-      await post('/api/auth/setup', emailMode ? { name, email: email.trim(), password: secret } : { name, passphrase: secret });
+      await authPost('/api/auth/setup', emailMode ? { name, email: email.trim(), password: secret } : { name, passphrase: secret });
       toast('BLOBS is ready.', 'good');
       await onDone();
     } catch (err) {
@@ -220,7 +240,7 @@ function LoginScreen({ companionName, mode, onDone }: { companionName: string; m
     setBusy(true);
     setError('');
     try {
-      await post('/api/auth/login', emailMode ? { email: email.trim(), password: secret } : { passphrase: secret });
+      await authPost('/api/auth/login', emailMode ? { email: email.trim(), password: secret } : { passphrase: secret });
       await onDone();
     } catch (err) {
       setError((err as Error).message);

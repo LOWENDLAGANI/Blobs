@@ -45,10 +45,10 @@ export const pool = new Pool({
   // Keep idle clients around longer so a quiet instance does not pay a fresh
   // TCP/TLS handshake (and Supabase pooler wake-up) on every request.
   idleTimeoutMillis: 60_000,
-  // Supabase free-tier databases and paused projects can take well over 15s
-  // to accept the first connection; give them room to wake before declaring a
-  // timeout. A genuine network failure still surfaces, just later.
-  connectionTimeoutMillis: 60_000,
+  // Fail fast. Waiting a minute for a connection leaves the sign-in button
+  // spinning with no error to show; a slow statement is bounded separately by
+  // statement_timeout below.
+  connectionTimeoutMillis: 15_000,
   // Match the connection budget so a single slow statement cannot outlive it,
   // while still allowing the schema bootstrap and FTS queries to finish.
   options: '-c statement_timeout=60000',
@@ -241,6 +241,23 @@ function isConnectionError(error: unknown): boolean {
     code === 'econnreset' ||
     code === 'enotfound'
   );
+}
+
+/**
+ * Reject if `work` has not settled within `ms`. Interactive endpoints use this
+ * so a sleeping pooler produces an error instead of a request that never ends;
+ * the underlying query still finishes on its own and its result is discarded.
+ */
+export async function withDeadline<T>(work: Promise<T>, ms: number, message: string): Promise<T> {
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  const deadline = new Promise<never>((_resolve, reject) => {
+    timer = setTimeout(() => reject(new Error(message)), ms);
+  });
+  try {
+    return await Promise.race([work, deadline]);
+  } finally {
+    if (timer) clearTimeout(timer);
+  }
 }
 
 /** Retry a single query once when the failure looks like a transient connection problem. */
