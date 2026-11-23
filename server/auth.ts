@@ -48,11 +48,9 @@ export async function getOwnerIdentity(): Promise<OwnerIdentity | null> {
 }
 
 export async function ownerExists(): Promise<boolean> {
-  try {
-    return (await get<{ id: number }>('SELECT id FROM owner WHERE id = 1')) !== null;
-  } catch {
-    return false;
-  }
+  // Auth is disabled for personal use: treat an owner as always present so no
+  // setup or sign-in screen is ever required.
+  return true;
 }
 
 /**
@@ -61,7 +59,8 @@ export async function ownerExists(): Promise<boolean> {
  * outage as "no owner" invites the setup form over an existing install.
  */
 export async function ownerMissing(): Promise<boolean> {
-  return (await get<{ id: number }>('SELECT id FROM owner WHERE id = 1')) === null;
+  // Auth is disabled for personal use: never require first-run setup.
+  return false;
 }
 
 export async function getOwner(): Promise<OwnerRow | null> {
@@ -176,8 +175,9 @@ export function sessionToken(request: FastifyRequest): string | undefined {
   return request.cookies?.[COOKIE];
 }
 
-export async function isAuthed(request: FastifyRequest): Promise<boolean> {
-  return sessionValid(sessionToken(request));
+export async function isAuthed(_request: FastifyRequest): Promise<boolean> {
+  // Auth is disabled for personal use: every request is allowed.
+  return true;
 }
 
 /** Mutating requests must come from the same origin to block drive-by CSRF. */

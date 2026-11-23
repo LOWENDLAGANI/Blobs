@@ -271,19 +271,12 @@ async function main(): Promise<void> {
     process.exit(1);
   }
 
-  console.log('\nAuth and setup');
-  const anon = await call<{ error: string }>('GET', '/api/overview');
-  check('unauthenticated API is rejected', anon.status === 401, `got ${anon.status}`);
-
-  const setup = await call<{ ok: boolean }>('POST', '/api/auth/setup', { name: 'Sam', passphrase: 'smoke-passphrase-1' });
-  check('owner setup succeeds', setup.status === 200 && setup.data.ok === true, JSON.stringify(setup.data));
-  check('session cookie issued', cookie.startsWith('blobs_session='));
-
-  const badLogin = await call('POST', '/api/auth/login', { passphrase: 'wrong-passphrase' });
-  check('wrong passphrase rejected', badLogin.status === 401);
+  console.log('\nAccess (no auth)');
+  const anon = await call<{ ok: boolean }>('GET', '/api/overview');
+  check('API is open without login', anon.status === 200, `got ${anon.status}`);
 
   const authState = await call<{ authed: boolean }>('GET', '/api/auth/state');
-  check('session is valid', authState.data.authed === true);
+  check('auth state reports signed in', authState.data.authed === true);
 
   console.log('\nModel configuration');
   const configured = await call<{ ok: boolean }>('PATCH', '/api/settings', {

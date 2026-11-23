@@ -26,18 +26,6 @@ type Route =
   | 'integrations'
   | 'settings';
 
-type AuthMode = 'supabase' | 'passphrase';
-
-interface AuthState {
-  setupRequired: boolean;
-  authed: boolean;
-  mode: AuthMode;
-  ownerName: string | null;
-  ownerEmail: string | null;
-  companionName: string;
-  tagline: string;
-}
-
 interface Overview {
   companion: { name: string; tagline: string };
   owner: { name: string; timezone: string };
@@ -70,26 +58,7 @@ function routeFromHash(): Route {
 }
 
 export function App() {
-  const [auth, setAuth] = useState<AuthState | null>(null);
   const [route, setRoute] = useState<Route>(routeFromHash());
-
-  const reloadAuth = useCallback(async () => {
-    const controller = new AbortController();
-    const timer = window.setTimeout(() => controller.abort(), 8000);
-    try {
-      const state = await api<AuthState>('/api/auth/state', { signal: controller.signal });
-      setAuth(state);
-    } catch {
-      // Degrade instead of hanging forever on "Waking up…".
-      setAuth({ setupRequired: false, authed: false, mode: 'passphrase', ownerName: null, ownerEmail: null, companionName: 'BLOBS', tagline: 'Your personal agent' });
-    } finally {
-      window.clearTimeout(timer);
-    }
-  }, []);
-
-  useEffect(() => {
-    void reloadAuth();
-  }, [reloadAuth]);
 
   useEffect(() => {
     const onHash = (): void => setRoute(routeFromHash());
@@ -102,190 +71,14 @@ export function App() {
     setRoute(next);
   }, []);
 
-  if (!auth) {
-    return (
-      <div className="boot">
-        <div className="orb-static" />
-        <p>Waking up…</p>
-      </div>
-    );
-  }
-
-  if (auth.setupRequired) {
-    return (
-      <ToastProvider>
-        <SetupScreen mode={auth.mode} onDone={reloadAuth} />
-      </ToastProvider>
-    );
-  }
-
-  if (!auth.authed) {
-    return (
-      <ToastProvider>
-        <LoginScreen companionName={auth.companionName} mode={auth.mode} onDone={reloadAuth} />
-      </ToastProvider>
-    );
-  }
-
   return (
     <ToastProvider>
-      <Shell route={route} go={go} onSignOut={reloadAuth} />
+      <Shell route={route} go={go} />
     </ToastProvider>
   );
 }
 
-/* ------------------------------------------------------------------ */
-/* Screens                                                             */
-/* ------------------------------------------------------------------ */
-
-/**
- * Sign-in/setup must never leave the form spinning: if the server does not
- * answer (usually an unreachable database), abort and say so. The server bounds
- * the database work itself; this covers a request that hangs before that.
- */
-async function authPost(path: string, body: unknown): Promise<void> {
-  const controller = new AbortController();
-  const timer = window.setTimeout(() => controller.abort(), 20_000);
-  try {
-    await post(path, body, { signal: controller.signal });
-  } catch (error) {
-    if ((error as Error).name === 'AbortError') {
-      throw new Error('The server did not answer in time. Check that its database is reachable, then try again.');
-    }
-    throw error;
-  } finally {
-    window.clearTimeout(timer);
-  }
-}
-
-function SetupScreen({ mode, onDone }: { mode: AuthMode; onDone: () => Promise<void> }) {
-  const toast = useToast();
-  const [name, setName] = useState('');
-  const [email, setEmail] = useState('');
-  const [secret, setSecret] = useState('');
-  const [confirm, setConfirm] = useState('');
-  const [busy, setBusy] = useState(false);
-  const [error, setError] = useState('');
-  const emailMode = mode === 'supabase';
-
-  const submit = async (): Promise<void> => {
-    if (emailMode && !/^\S+@\S+\.\S+$/.test(email.trim())) return setError('Enter a valid email address.');
-    if (secret.length < 8) return setError(`Use at least 8 characters for the ${emailMode ? 'password' : 'passphrase'}.`);
-    if (secret !== confirm) return setError(emailMode ? 'The two passwords do not match.' : 'The two passphrases do not match.');
-    setBusy(true);
-    setError('');
-    try {
-      await authPost('/api/auth/setup', emailMode ? { name, email: email.trim(), password: secret } : { name, passphrase: secret });
-      toast('BLOBS is ready.', 'good');
-      await onDone();
-    } catch (err) {
-      setError((err as Error).message);
-    } finally {
-      setBusy(false);
-    }
-  };
-
-  return (
-    <div className="auth">
-      <div className="auth-art">
-        <div className="orb-static" />
-      </div>
-      <div className="auth-panel">
-        <p className="eyebrow">First run</p>
-        <h1>Meet BLOBS</h1>
-        <p className="lede">
-          {emailMode
-            ? 'One continuous agent with its own memory, tasks and voice. Sign in with an email and password, handled by Supabase Auth so you can reach it from any device.'
-            : 'One continuous agent with its own memory, tasks and voice. This passphrase protects the whole control centre — it is hashed on the server and never leaves it.'}
-        </p>
-        <Field label="What should BLOBS call you?">
-          <Input value={name} onChange={(event) => setName(event.target.value)} placeholder="Your name" autoFocus={!emailMode} />
-        </Field>
-        {emailMode && (
-          <Field label="Owner email">
-            <Input type="email" value={email} onChange={(event) => setEmail(event.target.value)} placeholder="you@example.com" autoFocus />
-          </Field>
-        )}
-        <Field
-          label={emailMode ? 'Password' : 'Owner passphrase'}
-          hint="At least 8 characters. There is no recovery, so store it well."
-        >
-          <Input
-            type="password"
-            value={secret}
-            onChange={(event) => setSecret(event.target.value)}
-            placeholder="••••••••"
-          />
-        </Field>
-        <Field label={emailMode ? 'Repeat password' : 'Repeat passphrase'}>
-          <Input type="password" value={confirm} onChange={(event) => setConfirm(event.target.value)} onKeyDown={(e) => e.key === 'Enter' && void submit()} />
-        </Field>
-        {error && <p className="form-error">{error}</p>}
-        <Button size="lg" busy={busy} onClick={() => void submit()}>
-          Create BLOBS
-        </Button>
-      </div>
-    </div>
-  );
-}
-
-function LoginScreen({ companionName, mode, onDone }: { companionName: string; mode: AuthMode; onDone: () => Promise<void> }) {
-  const [email, setEmail] = useState('');
-  const [secret, setSecret] = useState('');
-  const [busy, setBusy] = useState(false);
-  const [error, setError] = useState('');
-  const emailMode = mode === 'supabase';
-
-  const submit = async (): Promise<void> => {
-    setBusy(true);
-    setError('');
-    try {
-      await authPost('/api/auth/login', emailMode ? { email: email.trim(), password: secret } : { passphrase: secret });
-      await onDone();
-    } catch (err) {
-      setError((err as Error).message);
-    } finally {
-      setBusy(false);
-    }
-  };
-
-  return (
-    <div className="auth auth-login">
-      <div className="auth-panel">
-        <div className="orb-static orb-small" />
-        <h1>{companionName}</h1>
-        <p className="lede">Sign in to your agent.</p>
-        {emailMode && (
-          <Field label="Email">
-            <Input
-              type="email"
-              value={email}
-              onChange={(event) => setEmail(event.target.value)}
-              placeholder="you@example.com"
-              autoFocus
-            />
-          </Field>
-        )}
-        <Field label={emailMode ? 'Password' : 'Owner passphrase'}>
-          <Input
-            type="password"
-            value={secret}
-            onChange={(event) => setSecret(event.target.value)}
-            onKeyDown={(event) => event.key === 'Enter' && void submit()}
-            autoFocus={!emailMode}
-            placeholder="••••••••"
-          />
-        </Field>
-        {error && <p className="form-error">{error}</p>}
-        <Button size="lg" busy={busy} onClick={() => void submit()}>
-          Unlock
-        </Button>
-      </div>
-    </div>
-  );
-}
-
-function Shell({ route, go, onSignOut }: { route: Route; go: (route: Route) => void; onSignOut: () => Promise<void> }) {
+function Shell({ route, go }: { route: Route; go: (route: Route) => void }) {
   const [overview, setOverview] = useState<Overview | null>(null);
   const [notifications, setNotifications] = useState<
     { id: string; ts: number; title: string; body: string; level: string; read: number; link: string | null }[]
@@ -353,11 +146,6 @@ function Shell({ route, go, onSignOut }: { route: Route; go: (route: Route) => v
     await refresh();
   };
 
-  const signOut = async (): Promise<void> => {
-    await post('/api/auth/logout').catch(() => undefined);
-    await onSignOut();
-  };
-
   const page = useMemo<ReactNode>(() => {
     switch (route) {
       case 'tasks':
@@ -410,10 +198,7 @@ function Shell({ route, go, onSignOut }: { route: Route; go: (route: Route) => v
         </nav>
 
         <div className="rail-foot">
-          <button className="nav-item" onClick={signOut}>
-            <span className="avatar">{(overview?.owner.name ?? 'O').slice(0, 1).toUpperCase()}</span>
-            <span>Sign out</span>
-          </button>
+          <span className="avatar">{(overview?.owner.name ?? 'O').slice(0, 1).toUpperCase()}</span>
         </div>
       </aside>
 
